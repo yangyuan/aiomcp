@@ -1,0 +1,2 @@
+class McpClient:
+    pass
