@@ -1,11 +1,11 @@
 [project]
 name = "aiomcp"
 description = "A Simple Python MCP Solution"
-version = "0.0.0"
+version = "0.0.1"
 requires-python = ">=3.8"
 readme = "README.md"
 license-files = ["LICENSE"]
-dependencies = []
+dependencies = ["pydantic"]
 
 [project.optional-dependencies]
 test = ["pytest", "pytest-asyncio"]
