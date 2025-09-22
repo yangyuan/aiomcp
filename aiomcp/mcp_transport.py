@@ -1,37 +1,19 @@
-from abc import ABC, abstractmethod
-from typing import AsyncIterator
-from aiomcp.contracts.mcp_message import (
-    McpMessage,
-)
+import re
+from typing import Optional, Tuple
+
+from aiomcp.transports.http import McpHttpTransport
 
 
-class McpClientTransport(ABC):
-    @abstractmethod
-    async def client_initialize(self):
-        pass
+class McpTransportResolver:
+    @staticmethod
+    def resolve(connection: str) -> Tuple[str, Optional[int], str]:
 
-    @abstractmethod
-    async def client_messages(self) -> AsyncIterator[McpMessage]:
-        yield
-
-    @abstractmethod
-    async def client_send_message(self, message: McpMessage) -> bool:
-        pass
-
-
-class McpServerTransport(ABC):
-    @abstractmethod
-    async def server_initialize(self):
-        pass
-
-    @abstractmethod
-    async def server_messages(self) -> AsyncIterator[McpMessage]:
-        yield
-
-    @abstractmethod
-    async def server_send_message(self, message: McpMessage) -> bool:
-        pass
-
-
-class McpTransport(McpClientTransport, McpServerTransport):
-    pass
+        pattern = re.compile(r"^http://([A-Za-z0-9.-]+):(\d+)(/.*)?$")
+        match = pattern.match(connection)
+        if match:
+            hostname, port, path = match.groups()
+            return McpHttpTransport(hostname, int(port), path=path)
+        else:
+            raise ValueError(
+                f"{McpTransportResolver.__name__} failed to resolve transport connection: {connection}"
+            )

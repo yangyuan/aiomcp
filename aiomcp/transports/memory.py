@@ -2,10 +2,10 @@ from asyncio import Queue
 from typing import AsyncIterator
 from aiomcp.contracts.mcp_message import McpMessage
 from aiomcp.mcp_serialization import McpSerialization
-from aiomcp.mcp_transport import McpTransport
+from aiomcp.transports.base import McpTransport
 
 
-class MemoryMcpTransport(McpTransport):
+class McpMemoryTransport(McpTransport):
     def __init__(self) -> None:
         self._server_to_client: Queue[McpMessage] = Queue()
         self._client_to_server: Queue[McpMessage] = Queue()

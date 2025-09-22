@@ -9,7 +9,7 @@ from aiomcp.contracts.mcp_message import (
     McpResponseOrError,
 )
 from aiomcp.mcp_serialization import McpSerialization
-from aiomcp.mcp_transport import McpClientTransport
+from aiomcp.transports.base import McpClientTransport
 
 
 # Direct transport is a transport that has dependency on server behavior.
@@ -20,11 +20,11 @@ class McpServerLike(Protocol):
     async def process(self, req: McpRequest) -> McpResponseOrError: ...
 
 
-class DirectMcpClientTransport(McpClientTransport):
+class McpDirectClientTransport(McpClientTransport):
     def __init__(self, server: McpServerLike) -> None:
         if not isinstance(server, McpServerLike):
             raise ValueError(
-                f"{DirectMcpClientTransport.__name__} can only take a McpServer like object"
+                f"{McpDirectClientTransport.__name__} can only take a McpServer like object"
             )
         self._server = server
         self._server_to_client: Queue[McpMessage] = Queue()
@@ -49,7 +49,7 @@ class DirectMcpClientTransport(McpClientTransport):
                     McpError(
                         id=message.id,
                         error=McpSystemError(
-                            message=f"{DirectMcpClientTransport.__name__} processing request error: {e}"
+                            message=f"{McpDirectClientTransport.__name__} processing request error: {e}"
                         ),
                     )
                 )
@@ -59,5 +59,5 @@ class DirectMcpClientTransport(McpClientTransport):
         return False
 
 
-class DirectMcpTransport(DirectMcpClientTransport):
+class McpDirectTransport(McpDirectClientTransport):
     pass

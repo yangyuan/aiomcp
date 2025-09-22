@@ -1,4 +1,3 @@
-import asyncio
 import pytest
 from pydantic import BaseModel
 
@@ -9,9 +8,10 @@ from aiomcp.contracts.mcp_message import (
     McpCallToolRequest,
     McpResponse,
 )
-from aiomcp.mcp_transport import McpClientTransport
-from aiomcp.transports.direct import DirectMcpTransport
-from aiomcp.transports.memory import MemoryMcpTransport
+from aiomcp.transports.base import McpClientTransport
+from aiomcp.transports.direct import McpDirectTransport
+from aiomcp.transports.memory import McpMemoryTransport
+from aiomcp.transports.http import McpHttpTransport
 
 
 class EchoInput(BaseModel):
@@ -56,14 +56,26 @@ async def _client_driven_validation(
 async def test_direct_transport():
     mcp_server = McpServer()
     mcp_client = McpClient()
-    transport = DirectMcpTransport(mcp_server)
+    transport = McpDirectTransport(mcp_server)
     await _client_driven_validation(transport, mcp_client, mcp_server)
 
 
 @pytest.mark.asyncio
 async def test_memory_transport():
-    transport = MemoryMcpTransport()
+    transport = McpMemoryTransport()
     mcp_server = McpServer()
     await mcp_server.create_host_task(transport)
     mcp_client = McpClient()
     await _client_driven_validation(transport, mcp_client, mcp_server)
+
+
+@pytest.mark.asyncio
+async def test_http_transport(unused_tcp_port):
+    port = unused_tcp_port
+    mcp_server = McpServer()
+    await mcp_server.create_host_task(f"http://127.0.0.1:{port}/aiomcp")
+
+    client_transport = McpHttpTransport("127.0.0.1", port, path="/aiomcp")
+    mcp_client = McpClient()
+
+    await _client_driven_validation(client_transport, mcp_client, mcp_server)

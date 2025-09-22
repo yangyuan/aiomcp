@@ -12,7 +12,8 @@ from typing import (
 
 from pydantic import BaseModel, TypeAdapter
 from aiomcp.contracts.mcp_schema import JsonSchema
-from aiomcp.mcp_transport import McpServerTransport
+from aiomcp.mcp_transport import McpTransportResolver
+from aiomcp.transports.base import McpServerTransport
 from aiomcp.contracts.mcp_tool import McpTool
 from aiomcp.contracts.mcp_message import (
     McpCallToolRequest,
@@ -84,11 +85,16 @@ class McpServer:
         return list(self._tools.values())
 
     async def create_host_task(
-        self, transport: McpServerTransport
-    ) -> McpServerTransport:
+        self, transport: McpServerTransport | str
+    ) -> asyncio.Task:
         if self._hosting:
             raise RuntimeError(f"{McpServer.__name__} is already hosting")
         self._hosting = True
+
+        if isinstance(transport, str):
+            transport = McpTransportResolver.resolve(transport)
+
+        await transport.server_initialize()
 
         if self._message_loop is None:
             self._message_loop = asyncio.create_task(
@@ -96,7 +102,7 @@ class McpServer:
             )
         return self._message_loop
 
-    async def host(self, transport: McpServerTransport) -> None:
+    async def host(self, transport: McpServerTransport | str) -> None:
         await self.create_host_task(transport)
 
     def _to_kwargs(

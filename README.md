@@ -17,14 +17,14 @@ mcp_server = McpServer("mcp-server-name")
 await mcp_server.register_tool("tool_1", func)
 await mcp_server.register_tool("tool_2", impl.method)
 await mcp_server.register_tool("tool_3", ToolImpl.class_method)
-await mcp_server.host("http://127.0.0.1:8000")
+await mcp_server.host("http://127.0.0.1:8000/mcp")
 ```
 
 ### A simple McpClient
 
 ```python
 mcp_client = McpClient("mcp-client-name")
-await mcp_client.initialize("http://127.0.0.1:8000")
+await mcp_client.initialize("http://127.0.0.1:8000/mcp")
 # mcp_client = mcp_client.initialize("server.py") for stdio
 # mcp_client = mcp_client.initialize(mcp_server) for quick testing without hosting server
 sum_value = await mcp_client.invoke("name", {"a": 1, "b": 2})
@@ -38,23 +38,24 @@ While `McpClient` and `McpServer` handle client/server behavior, they are implem
 
 ```python
 mcp_server = McpServer()
-await mcp_server.host(HttpTransport("127.0.0.1", 8000))
+await mcp_server.host(McpHttpTransport("127.0.0.1", 8000))
 ```
 
 ```python
 mcp_client = McpClient()
-await mcp_client.initialize(HttpTransport("127.0.0.1", 8000))
+await mcp_client.initialize(McpHttpTransport("127.0.0.1", 8000))
 ```
 
 Supported `McpTransport` implementations:
-- `SocksMcpTransport`
-- `HttpMcpTransport`
-- `StdioMcpTransport`
-- `MemoryMcpTransport`
+- `McpDirectTransport`: Simple client driven transport that invokes `McpServer` with minimal MCP protocol overhead.
+- `McpMemoryTransport`: Single event loop, in-memory transport.
+- `McpHttpTransport`
+- `McpStdioTransport`
+- `McpSocksTransport`
 
-Sample: Using MemoryMcpTransport for local debugging.
+Sample: Using McpMemoryTransport for local debugging.
 ```python
-transport = MemoryMcpTransport()
+transport = McpMemoryTransport()
 
 mcp_server = McpServer()
 asyncio.create_task(mcp_server.host(transport))

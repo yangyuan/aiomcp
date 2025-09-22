@@ -3,8 +3,9 @@ from typing import Any, Dict, List
 import uuid
 from aiomcp.contracts.mcp_schema import JsonSchemaType
 from aiomcp.mcp_server import McpServer
-from aiomcp.mcp_transport import McpClientTransport
-from aiomcp.transports.direct import DirectMcpClientTransport
+from aiomcp.mcp_transport import McpTransportResolver
+from aiomcp.transports.base import McpClientTransport
+from aiomcp.transports.direct import McpDirectClientTransport
 from aiomcp.contracts.mcp_tool import McpTool
 from aiomcp.contracts.mcp_message import (
     McpCallToolRequest,
@@ -50,12 +51,10 @@ class McpClient:
 
         if not isinstance(transport, McpClientTransport):
             if isinstance(transport, McpServer):
-                transport = DirectMcpClientTransport(transport)
+                transport = McpDirectClientTransport(transport)
             elif isinstance(transport, str):
-                # TODO: implement string-based transport selection for studio/socket/http
-                raise NotImplementedError(
-                    f"{McpClient.__name__} cannot take a str as transport yet"
-                )
+                transport = McpTransportResolver.resolve(transport)
+                self._transport = transport
         self._transport = transport
 
         await self._transport.client_initialize()
@@ -91,8 +90,8 @@ class McpClient:
         return future
 
     async def _process(self, request: McpRequest) -> McpResponseOrError:
-        await self._transport.client_send_message(request)
         future = await self._generate_response_future(request.id)
+        await self._transport.client_send_message(request)
         return await future
 
     async def _initialize_server(self) -> McpInitializeParams:
