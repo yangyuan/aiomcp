@@ -57,7 +57,7 @@ async def add_with_pydantic(input: SumRequestInput) -> SumResponseOutput:
 async def test_complex_message():
     server = McpServer()
 
-    await server.register_tool(
+    await server.mcp_tools_register(
         "add",
         add_with_pydantic,
         json.loads(input_schema_add),

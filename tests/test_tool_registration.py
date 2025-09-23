@@ -55,13 +55,10 @@ async def test_tool_registration():
     add_tools = []
 
     await server.register_tool(
-        "add_async",
         add_async,
-        json.loads(input_schema_add),
-        json.loads(output_schema_add),
     )
     add_tools.append("add_async")
-    await server.register_tool(
+    await server.mcp_tools_register(
         "add_sync",
         add_sync,
         json.loads(input_schema_add),
@@ -69,30 +66,23 @@ async def test_tool_registration():
     )
     add_tools.append("add_sync")
 
-    await server.register_tool(
+    await server.mcp_tools_register(
         "add_static_async",
         AddClass.static_add_async,
         json.loads(input_schema_add),
         json.loads(output_schema_add),
     )
     add_tools.append("add_static_async")
-    await server.register_tool(
-        "add_static_sync",
-        AddClass.static_add_sync,
-        json.loads(input_schema_add),
-        json.loads(output_schema_add),
-    )
-    add_tools.append("add_static_sync")
+    await server.register_tool(AddClass.static_add_sync)
+    add_tools.append("static_add_sync")
 
     add_instance = AddClass()
     await server.register_tool(
-        "add_instance_async",
         add_instance.add_async,
-        json.loads(input_schema_add),
-        json.loads(output_schema_add),
+        alias="add_instance_async",
     )
     add_tools.append("add_instance_async")
-    await server.register_tool(
+    await server.mcp_tools_register(
         "add_instance_sync",
         add_instance.add_sync,
         json.loads(input_schema_add),

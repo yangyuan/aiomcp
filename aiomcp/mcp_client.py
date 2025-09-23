@@ -3,7 +3,7 @@ from typing import Any, Dict, List
 import uuid
 from aiomcp.contracts.mcp_schema import JsonSchemaType
 from aiomcp.mcp_server import McpServer
-from aiomcp.mcp_transport import McpTransportResolver
+from aiomcp.mcp_transport_resolver import McpTransportResolver
 from aiomcp.transports.base import McpClientTransport
 from aiomcp.transports.direct import McpDirectClientTransport
 from aiomcp.contracts.mcp_tool import McpTool

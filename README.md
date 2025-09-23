@@ -38,12 +38,14 @@ While `McpClient` and `McpServer` handle client/server behavior, they are implem
 
 ```python
 mcp_server = McpServer()
-await mcp_server.host(McpHttpTransport("127.0.0.1", 8000))
+await mcp_server.host(McpHttpTransport("127.0.0.1", 8000, "/mcp"))
+# await mcp_server.host("http://127.0.0.1:8000/mcp")
 ```
 
 ```python
 mcp_client = McpClient()
-await mcp_client.initialize(McpHttpTransport("127.0.0.1", 8000))
+await mcp_client.initialize(McpHttpTransport("127.0.0.1", 8000, "/mcp"))
+# await mcp_client.initialize("http://127.0.0.1:8000/mcp")
 ```
 
 Supported `McpTransport` implementations:

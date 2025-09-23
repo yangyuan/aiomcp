@@ -12,7 +12,8 @@ from typing import (
 
 from pydantic import BaseModel, TypeAdapter
 from aiomcp.contracts.mcp_schema import JsonSchema
-from aiomcp.mcp_transport import McpTransportResolver
+from aiomcp.mcp_schema_resolver import McpSchemaResolver
+from aiomcp.mcp_transport_resolver import McpTransportResolver
 from aiomcp.transports.base import McpServerTransport
 from aiomcp.contracts.mcp_tool import McpTool
 from aiomcp.contracts.mcp_message import (
@@ -44,6 +45,22 @@ class McpServer:
         self._inflight: Set[asyncio.Task] = set()
 
     async def register_tool(
+        self,
+        func: Callable,
+        alias: Optional[str] = None,
+        description: Optional[str] = None,
+    ) -> None:
+        func_name, input_schema, output_schema = McpSchemaResolver.resolve(func)
+
+        await self.mcp_tools_register(
+            name=alias or func_name,
+            func=func,
+            input_schema=input_schema,
+            output_schema=output_schema,
+            description=description,
+        )
+
+    async def mcp_tools_register(
         self,
         name: str,
         func: Callable,

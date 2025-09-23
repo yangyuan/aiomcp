@@ -29,7 +29,7 @@ async def echo_func(text: str) -> EchoOutput:
 async def _client_driven_validation(
     client_transport: McpClientTransport, client: McpClient, server: McpServer
 ):
-    await server.register_tool(
+    await server.mcp_tools_register(
         "echo",
         echo_func,
         EchoInput.model_json_schema(),

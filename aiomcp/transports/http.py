@@ -184,7 +184,7 @@ class McpHttpServerTransport(McpServerTransport):
 
 
 class McpHttpTransport(McpTransport):
-    def __init__(self, hostname: str, port: int, *, path: str = "/") -> None:
+    def __init__(self, hostname: str, port: int, path: str = "/") -> None:
         self._client: McpHttpClientTransport = McpHttpClientTransport(
             hostname, port, path=path
         )
