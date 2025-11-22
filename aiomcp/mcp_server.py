@@ -1,5 +1,6 @@
 import asyncio
 import inspect
+from enum import StrEnum
 from typing import (
     Any,
     Awaitable,
@@ -7,15 +8,16 @@ from typing import (
     Dict,
     Optional,
     List,
-    Set,
 )
 
 from pydantic import BaseModel, TypeAdapter
 from aiomcp.contracts.mcp_schema import JsonSchema
+from aiomcp.mcp_flag import McpServerFlags
 from aiomcp.mcp_schema_resolver import McpSchemaResolver
 from aiomcp.mcp_transport_resolver import McpTransportResolver
 from aiomcp.transports.base import McpServerTransport
 from aiomcp.contracts.mcp_tool import McpTool
+from aiomcp.jsonrpc_error_codes import JsonRpcErrorCodes as McpErrorCodes
 from aiomcp.contracts.mcp_message import (
     McpCallToolRequest,
     McpResponseOrError,
@@ -29,21 +31,44 @@ from aiomcp.contracts.mcp_message import (
     McpCallToolResult,
     McpListToolsResult,
     McpInitializeRequest,
+    McpInitializedNotification,
 )
+from aiomcp.mcp_version import McpVersion
 
 
 class McpCallableTool(McpTool):
     callable_async: Callable[..., Awaitable]
 
 
+class McpSessionStatus(StrEnum):
+    UNINITIALIZED = "uninitialized"
+    INITIALIZING = "initializing"
+    INITIALIZED = "initialized"
+
+
+class McpSession:
+    def __init__(self, session_id: str) -> None:
+        self.id = session_id
+        self.status: McpSessionStatus = McpSessionStatus.UNINITIALIZED
+        self.inflight: Optional[asyncio.Task] = None
+        self.version: McpVersion = McpVersion()
+
+
 class McpServer:
     def __init__(self, name: str = "aiomcp-server") -> None:
+        self.flags = McpServerFlags()
         self.name = name
         self._tools: Dict[str, McpCallableTool] = {}
         self._hosting: bool = False  # TODO: remove once enable multiple hosting.
         self._message_loop: Optional[asyncio.Task] = None
-        self._inflight: Set[asyncio.Task] = set()
         self._server_transport: Optional[McpServerTransport] = None
+        self._sessions: Dict[str, McpSession] = {}
+
+    def _get_session(self, session_id: Optional[str]) -> McpSession:
+        session_id = session_id or "default"
+        if session_id not in self._sessions:
+            self._sessions[session_id] = McpSession(session_id)
+        return self._sessions[session_id]
 
     async def register_tool(
         self,
@@ -136,6 +161,18 @@ class McpServer:
                 pass
             except Exception:
                 pass
+
+        for session in self._sessions.values():
+            t = session.inflight
+            if t:
+                t.cancel()
+                try:
+                    await t
+                except asyncio.CancelledError:
+                    pass
+                except Exception:
+                    pass
+
         transport = self._server_transport
         self._server_transport = None
         if transport is not None:
@@ -160,10 +197,33 @@ class McpServer:
                     pass
         return _kwargs
 
-    async def process(self, request: McpRequest) -> McpResponseOrError:
+    async def process(self, request: McpRequest, session_id: str | None = None) -> McpResponseOrError:
         """Process a single MCP request and return a response."""
         try:
             method = request.method
+
+            if self.flags.enforce_mcp_initialize_sequence:
+                session = self._get_session(session_id)
+                if (
+                    session.status == McpSessionStatus.UNINITIALIZED
+                    and method != McpMethod.INITIALIZE
+                ):
+                    return McpError(
+                        id=request.id,
+                        error=McpSystemError(
+                            code=McpErrorCodes.INVALID_REQUEST,
+                            message=f"{McpServer.__name__} not initialized",
+                        ),
+                    )
+                if session.status == McpSessionStatus.INITIALIZING:
+                    return McpError(
+                        id=request.id,
+                        error=McpSystemError(
+                            code=McpErrorCodes.INVALID_REQUEST,
+                            message=f"{McpServer.__name__} initializing, waiting for initialized notification",
+                        ),
+                    )
+
             if method == McpMethod.TOOLS_LIST:
                 if not isinstance(request, McpListToolsRequest):
                     return McpError(
@@ -216,12 +276,22 @@ class McpServer:
                     return McpError(
                         id=request.id,
                         error=McpSystemError(
-                            message=f"{McpServer.__name__} request is not a {McpInitializeRequest.__name__}"
+                            code=McpErrorCodes.INVALID_REQUEST,
+                            message=f"{McpServer.__name__} request is not a {McpInitializeRequest.__name__}",
                         ),
                     )
+
+                session = self._get_session(session_id)
+                protocol_version = session.version.default_version
+                if self.flags.enforce_mcp_version_negotiation:
+                    client_version = request.params.protocolVersion
+                    if client_version:
+                        protocol_version = session.version.negotiate(client_version)
+
+                session.status = McpSessionStatus.INITIALIZING
                 result = McpInitializeResult(
                     capabilities={},
-                    protocolVersion="2024-11-05",
+                    protocolVersion=protocol_version,
                     serverInfo={"name": self.name, "version": "0.0.0"},
                 )
                 return McpResponse(id=request.id, result=result.model_dump())
@@ -241,14 +311,25 @@ class McpServer:
             )
 
     async def _handle_message_loop(self, transport: McpServerTransport) -> None:
-        async def _handle_request(request: McpRequest) -> None:
-            message = await self.process(request)
-            await transport.server_send_message(message)
+        async def _handle_request(request: McpRequest, session_id: str | None) -> None:
+            session = self._get_session(session_id)
+            task = asyncio.current_task()
+            if task:
+                session.inflight = task
+            try:
+                message = await self.process(request, session_id)
+                await transport.server_send_message(message, session_id)
+            finally:
+                if task and session.inflight == task:
+                    session.inflight = None
 
-        # TODO: _inflight management, graceful shutdown, etc.
-        # TODO: handle notifications
-        async for message in transport.server_messages():
+        async for message, session_id in transport.server_messages():
             if isinstance(message, McpRequest):
-                task = asyncio.create_task(_handle_request(message))
-                self._inflight.add(task)
-                task.add_done_callback(lambda t: self._inflight.discard(t))
+                asyncio.create_task(_handle_request(message, session_id))
+            elif isinstance(message, McpInitializedNotification):
+                session = self._get_session(session_id)
+                if self.flags.enforce_mcp_initialize_sequence:
+                    if session.status == McpSessionStatus.INITIALIZING:
+                        session.status = McpSessionStatus.INITIALIZED
+                else:
+                    session.status = McpSessionStatus.INITIALIZED

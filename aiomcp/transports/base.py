@@ -29,11 +29,13 @@ class McpServerTransport(ABC):
         pass
 
     @abstractmethod
-    async def server_messages(self) -> AsyncIterator[McpMessage]:
+    async def server_messages(self) -> AsyncIterator[tuple[McpMessage, str | None]]:
         yield
 
     @abstractmethod
-    async def server_send_message(self, message: McpMessage) -> bool:
+    async def server_send_message(
+        self, message: McpMessage, session_id: str | None = None
+    ) -> bool:
         pass
 
     @abstractmethod

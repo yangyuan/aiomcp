@@ -1,4 +1,5 @@
 import asyncio
+import uuid
 from typing import AsyncIterator, Dict, Optional
 
 import aiohttp
@@ -91,11 +92,9 @@ class McpHttpClientTransport(McpClientTransport):
                 isinstance(message, McpRequest)
                 and message.method == McpMethod.INITIALIZE
             ):
-                server_session_id = response.headers.get(
-                    HEADER_MCP_SESSION_ID, ""
-                ).lower()
+                server_session_id = response.headers.get(HEADER_MCP_SESSION_ID)
                 if server_session_id:
-                    self._session_id = server_session_id
+                    self._session_id = server_session_id.strip()
             response_body = await self._extract_payload_from_response_body(response)
 
         # For requests, the result must be a matching response/error and is enqueued.
@@ -125,8 +124,8 @@ class McpHttpServerTransport(McpServerTransport):
         self._hostname: str = hostname
         self._port: int = port
         self._runner: Optional[web.AppRunner] = None
-        self._client_to_server: asyncio.Queue[McpMessage] = asyncio.Queue()
-        self._inflight: Dict[str, asyncio.Future[McpResponseOrError]] = {}
+        self._client_to_server: asyncio.Queue[tuple[McpMessage, str | None]] = asyncio.Queue()
+        self._inflight: Dict[tuple[str | None, str], asyncio.Future[McpResponseOrError]] = {}
 
     async def server_initialize(self):
         if self._runner is not None:
@@ -140,20 +139,21 @@ class McpHttpServerTransport(McpServerTransport):
         _site = web.TCPSite(self._runner, self._hostname, self._port)
         await _site.start()
 
-    async def server_messages(self) -> AsyncIterator[McpMessage]:
+    async def server_messages(self) -> AsyncIterator[tuple[McpMessage, str | None]]:
         while True:
-            message = await self._client_to_server.get()
-            yield message
+            message_tuple = await self._client_to_server.get()
+            yield message_tuple
 
-    async def server_send_message(self, message: McpMessage) -> bool:
+    async def server_send_message(self, message: McpMessage, session_id: str | None = None) -> bool:
         message = McpSerialization.process_server_message(message)
         if isinstance(message, McpResponseOrError):
             request_id = str(message.id)
-            if request_id not in self._inflight:
+            key = (session_id, request_id)
+            if key not in self._inflight:
                 raise RuntimeError(
-                    f"{McpHttpServerTransport.__name__} has no matching request for response ID {request_id}"
+                    f"{McpHttpServerTransport.__name__} has no matching request for response ID {request_id} in session {session_id}"
                 )
-            future = self._inflight.pop(request_id)
+            future = self._inflight.pop(key)
             future.set_result(message)
             return True
         return False
@@ -167,15 +167,22 @@ class McpHttpServerTransport(McpServerTransport):
                 f"{McpHttpServerTransport.__name__} failed to parse request: {request_body.decode()}"
             )
 
+        session_id = request.headers.get(HEADER_MCP_SESSION_ID)
+        if isinstance(message, McpRequest) and message.method == McpMethod.INITIALIZE and not session_id:
+            session_id = uuid.uuid4().hex
+
         if isinstance(message, McpNotification):
-            await self._client_to_server.put(message)
+            await self._client_to_server.put((message, session_id))
             return web.Response(status=202)
         elif isinstance(message, McpRequest):
             future: asyncio.Future[McpResponseOrError] = asyncio.Future()
-            self._inflight[str(message.id)] = future
-            await self._client_to_server.put(message)
+            self._inflight[(session_id, str(message.id))] = future
+            await self._client_to_server.put((message, session_id))
             response = await future
-            return web.json_response(response.model_dump())
+            resp_obj = web.json_response(response.model_dump())
+            if message.method == McpMethod.INITIALIZE and session_id:
+                resp_obj.headers[HEADER_MCP_SESSION_ID] = session_id
+            return resp_obj
 
     async def close(self):
         if self._runner is not None:
@@ -205,12 +212,12 @@ class McpHttpTransport(McpTransport):
     async def server_initialize(self):
         await self._server.server_initialize()
 
-    async def server_messages(self) -> AsyncIterator[McpMessage]:
+    async def server_messages(self) -> AsyncIterator[tuple[McpMessage, str | None]]:
         async for message in self._server.server_messages():
             yield message
 
-    async def server_send_message(self, message: McpMessage) -> bool:
-        return await self._server.server_send_message(message)
+    async def server_send_message(self, message: McpMessage, session_id: str | None = None) -> bool:
+        return await self._server.server_send_message(message, session_id)
 
     async def close(self):
         await self._client.close()

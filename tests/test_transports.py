@@ -98,7 +98,7 @@ async def test_http_transport_numeric_request_id(unused_tcp_port):
         id=123,
         params=McpInitializeParams(
             capabilities={},
-            protocolVersion="2024-11-05",
+            protocolVersion="2025-06-18",
             clientInfo={"name": "test-client", "version": "0.0.0"},
         ),
     )

@@ -2,6 +2,7 @@ import asyncio
 from typing import Any, Dict, List
 import uuid
 from aiomcp.contracts.mcp_schema import JsonSchemaType
+from aiomcp.mcp_flag import McpClientFlags
 from aiomcp.mcp_server import McpServer
 from aiomcp.mcp_transport_resolver import McpTransportResolver
 from aiomcp.transports.base import McpClientTransport
@@ -23,10 +24,13 @@ from aiomcp.contracts.mcp_message import (
     McpMethod,
     McpCallToolResult,
 )
+from aiomcp.mcp_version import McpVersion
 
 
 class McpClient:
     def __init__(self, name: str = "aiomcp-client") -> None:
+        self.flags = McpClientFlags()
+        self.version = McpVersion()
         self.name = name
         self._initialized = False
         self._transport: McpClientTransport | None = None
@@ -87,10 +91,23 @@ class McpClient:
         if not self._initialized:
             raise RuntimeError(f"{McpClient.__name__} not initialized")
 
+
+    def _validate_system_error(self, msg: McpResponseOrError) -> None:
+        if isinstance(msg, McpError) and self.flags.throw_mcp_contract_errors:
+            if msg.error.code is None:
+                raise ValueError(
+                    "McpSystemError requires 'code', bypass by flag throw_mcp_contract_errors."
+                )
+            if msg.error.message is None:
+                raise ValueError(
+                    "McpSystemError requires 'message', bypass by flag throw_mcp_contract_errors."
+                )
+
     async def _handle_message_loop(self) -> None:
         # TODO: _inflight management, graceful shutdown, etc.
         async for msg in self._transport.client_messages():
             if isinstance(msg, McpResponseOrError):
+                self._validate_system_error(msg)
                 if msg.id in self._inflight:
                     self._inflight[msg.id].set_result(msg)
                     del self._inflight[msg.id]
@@ -118,7 +135,7 @@ class McpClient:
             id=request_id,
             params=McpInitializeParams(
                 capabilities={},
-                protocolVersion="2024-11-05",
+                protocolVersion=self.version.default_version,
                 clientInfo={"name": self.name, "version": "0.0.0"},
             ),
         )
@@ -133,6 +150,14 @@ class McpClient:
             raise RuntimeError(
                 f"{McpClient.__name__} failed to parse initialize result: {e}"
             )
+
+        if self.flags.enforce_mcp_version_negotiation:
+            if structured.protocolVersion not in self.version.supported_versions:
+                raise RuntimeError(
+                    f"{McpClient.__name__} server protocol version '{structured.protocolVersion}' not supported"
+                )
+            self.version.negotiate(structured.protocolVersion)
+
         return structured
 
     async def _refresh_tools(self) -> List[McpTool]:

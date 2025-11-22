@@ -68,6 +68,7 @@ class McpListToolsRequest(McpRequest):
 class McpSystemError(BaseModel):
     code: Optional[int | str] = None
     message: Optional[str] = None
+    data: Optional[Any] = None
 
 
 class McpError(McpPackage):

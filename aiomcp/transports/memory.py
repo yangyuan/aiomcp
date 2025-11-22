@@ -26,12 +26,14 @@ class McpMemoryTransport(McpTransport):
     async def server_initialize(self):
         pass
 
-    async def server_messages(self) -> AsyncIterator[McpMessage]:
+    async def server_messages(self) -> AsyncIterator[tuple[McpMessage, str | None]]:
         while True:
             message = await self._client_to_server.get()
-            yield message
+            yield message, None
 
-    async def server_send_message(self, message: McpMessage) -> bool:
+    async def server_send_message(
+        self, message: McpMessage, session_id: str | None = None
+    ) -> bool:
         message = McpSerialization.process_server_message(message)
         await self._server_to_client.put(message)
         return True
