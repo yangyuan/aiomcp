@@ -43,6 +43,7 @@ class McpServer:
         self._hosting: bool = False  # TODO: remove once enable multiple hosting.
         self._message_loop: Optional[asyncio.Task] = None
         self._inflight: Set[asyncio.Task] = set()
+        self._server_transport: Optional[McpServerTransport] = None
 
     async def register_tool(
         self,
@@ -110,6 +111,7 @@ class McpServer:
 
         if isinstance(transport, str):
             transport = McpTransportResolver.resolve(transport)
+        self._server_transport = transport
 
         await transport.server_initialize()
 
@@ -121,6 +123,23 @@ class McpServer:
 
     async def host(self, transport: McpServerTransport | str) -> None:
         await self.create_host_task(transport)
+
+    async def shutdown(self) -> None:
+        self._hosting = False
+        task = self._message_loop
+        self._message_loop = None
+        if task is not None:
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                pass
+        transport = self._server_transport
+        self._server_transport = None
+        if transport is not None:
+            await transport.close()
 
     def _to_kwargs(
         self, func: Callable[..., Awaitable], arguments: Dict[str, Any]

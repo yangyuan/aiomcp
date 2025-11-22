@@ -97,7 +97,6 @@ class McpListToolsResult(BaseModel):
 
 McpResponseOrError = Union[McpResponse, McpError]
 
-
 McpClientMessageAnnotated = Annotated[
     Union[
         McpInitializedNotification,
@@ -107,3 +106,5 @@ McpClientMessageAnnotated = Annotated[
     ],
     Field(discriminator="method"),
 ]
+
+McpServerMessageUnion = Union[McpResponseOrError, McpNotification]

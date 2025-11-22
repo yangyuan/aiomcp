@@ -58,6 +58,9 @@ class McpDirectClientTransport(McpClientTransport):
             return True
         return False
 
+    async def close(self):
+        self._server_to_client = Queue()
+
 
 class McpDirectTransport(McpDirectClientTransport):
     pass

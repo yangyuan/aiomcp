@@ -18,6 +18,10 @@ class McpClientTransport(ABC):
     async def client_send_message(self, message: McpMessage) -> bool:
         pass
 
+    @abstractmethod
+    async def close(self):
+        pass
+
 
 class McpServerTransport(ABC):
     @abstractmethod
@@ -30,6 +34,10 @@ class McpServerTransport(ABC):
 
     @abstractmethod
     async def server_send_message(self, message: McpMessage) -> bool:
+        pass
+
+    @abstractmethod
+    async def close(self):
         pass
 
 

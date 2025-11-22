@@ -1,6 +1,10 @@
 # aiomcp
 A Simple Python MCP Solution
 
+## Mission of aiomcp
+A smooth start experience.
+
+
 ## Tutorial
 
 **Expected Behavior for Version 0.1.0**
@@ -14,9 +18,9 @@ def func(a: int, b: int):
 impl = ToolImpl()
 
 mcp_server = McpServer("mcp-server-name")
-await mcp_server.register_tool("tool_1", func)
-await mcp_server.register_tool("tool_2", impl.method)
-await mcp_server.register_tool("tool_3", ToolImpl.class_method)
+await mcp_server.register_tool(func)
+await mcp_server.register_tool(impl.method, alias="tool_alias")
+await mcp_server.register_tool(ToolImpl.class_method)
 await mcp_server.host("http://127.0.0.1:8000/mcp")
 ```
 
@@ -25,8 +29,9 @@ await mcp_server.host("http://127.0.0.1:8000/mcp")
 ```python
 mcp_client = McpClient("mcp-client-name")
 await mcp_client.initialize("http://127.0.0.1:8000/mcp")
-# mcp_client = mcp_client.initialize("server.py") for stdio
-# mcp_client = mcp_client.initialize(mcp_server) for quick testing without hosting server
+# await mcp_client.initialize(McpHttpTransport("127.0.0.1", 8000, "/mcp"))
+# await mcp_client.initialize(McpStdioClientTransport([sys.executable, "server.py"]))
+# await mcp_client.initialize(mcp_server) for quick testing without hosting a server
 sum_value = await mcp_client.invoke("name", {"a": 1, "b": 2})
 # standard MCP functions
 # await mcp_client.mcp_tools_list() -> list[McpTool]
@@ -52,8 +57,7 @@ Supported `McpTransport` implementations:
 - `McpDirectTransport`: Simple client driven transport that invokes `McpServer` with minimal MCP protocol overhead.
 - `McpMemoryTransport`: Single event loop, in-memory transport.
 - `McpHttpTransport`
-- `McpStdioTransport`
-- `McpSocksTransport`
+- `McpStdioClientTransport` / `McpStdioServerTransport`: stdio based transport
 
 Sample: Using McpMemoryTransport for local debugging.
 ```python

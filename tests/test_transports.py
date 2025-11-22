@@ -1,3 +1,5 @@
+import asyncio
+
 import pytest
 from pydantic import BaseModel
 
@@ -6,12 +8,14 @@ from aiomcp.mcp_client import McpClient
 from aiomcp.contracts.mcp_message import (
     McpCallToolParams,
     McpCallToolRequest,
+    McpInitializeParams,
+    McpInitializeRequest,
     McpResponse,
 )
 from aiomcp.transports.base import McpClientTransport
 from aiomcp.transports.direct import McpDirectTransport
 from aiomcp.transports.memory import McpMemoryTransport
-from aiomcp.transports.http import McpHttpTransport
+from aiomcp.transports.http import McpHttpClientTransport, McpHttpTransport
 
 
 class EchoInput(BaseModel):
@@ -79,3 +83,30 @@ async def test_http_transport(unused_tcp_port):
     mcp_client = McpClient()
 
     await _client_driven_validation(client_transport, mcp_client, mcp_server)
+
+
+@pytest.mark.asyncio
+async def test_http_transport_numeric_request_id(unused_tcp_port):
+    port = unused_tcp_port
+    mcp_server = McpServer()
+    await mcp_server.create_host_task(f"http://127.0.0.1:{port}/aiomcp")
+
+    client_transport = McpHttpClientTransport("127.0.0.1", port, path="/aiomcp")
+    await client_transport.client_initialize()
+
+    initialize_request = McpInitializeRequest(
+        id=123,
+        params=McpInitializeParams(
+            capabilities={},
+            protocolVersion="2024-11-05",
+            clientInfo={"name": "test-client", "version": "0.0.0"},
+        ),
+    )
+
+    await client_transport.client_send_message(initialize_request)
+    response = await asyncio.wait_for(client_transport._server_to_client.get(), timeout=1)
+
+    assert isinstance(response, McpResponse)
+    assert response.id == 123
+
+    await client_transport.close()

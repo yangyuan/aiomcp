@@ -148,7 +148,7 @@ class McpHttpServerTransport(McpServerTransport):
     async def server_send_message(self, message: McpMessage) -> bool:
         message = McpSerialization.process_server_message(message)
         if isinstance(message, McpResponseOrError):
-            request_id = message.id
+            request_id = str(message.id)
             if request_id not in self._inflight:
                 raise RuntimeError(
                     f"{McpHttpServerTransport.__name__} has no matching request for response ID {request_id}"

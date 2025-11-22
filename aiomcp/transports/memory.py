@@ -35,3 +35,7 @@ class McpMemoryTransport(McpTransport):
         message = McpSerialization.process_server_message(message)
         await self._server_to_client.put(message)
         return True
+
+    async def close(self):
+        self._server_to_client = Queue()
+        self._client_to_server = Queue()

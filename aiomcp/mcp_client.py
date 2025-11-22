@@ -64,6 +64,24 @@ class McpClient:
         await self._refresh_tools()
         self._initialized = True
 
+    async def close(self) -> None:
+        loop_task = self._message_loop
+        self._message_loop = None
+        if loop_task is not None:
+            loop_task.cancel()
+            try:
+                await loop_task
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                pass
+
+        transport = self._transport
+        self._transport = None
+        if transport is not None:
+            await transport.close()
+        self._initialized = False
+
     def _check_initialized(self) -> None:
         # TODO: lazy initialize when project is stable.
         if not self._initialized:
@@ -94,7 +112,7 @@ class McpClient:
         await self._transport.client_send_message(request)
         return await future
 
-    async def _initialize_server(self) -> McpInitializeParams:
+    async def _initialize_server(self) -> McpInitializeResult:
         request_id = self._generate_request_id()
         request = McpInitializeRequest(
             id=request_id,
