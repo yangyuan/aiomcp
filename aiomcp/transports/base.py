@@ -3,11 +3,12 @@ from typing import AsyncIterator
 from aiomcp.contracts.mcp_message import (
     McpMessage,
 )
+from aiomcp.mcp_context import McpServerContext, McpClientContext
 
 
 class McpClientTransport(ABC):
     @abstractmethod
-    async def client_initialize(self):
+    async def client_initialize(self, context: McpClientContext):
         pass
 
     @abstractmethod
@@ -25,7 +26,7 @@ class McpClientTransport(ABC):
 
 class McpServerTransport(ABC):
     @abstractmethod
-    async def server_initialize(self):
+    async def server_initialize(self, context: McpServerContext):
         pass
 
     @abstractmethod

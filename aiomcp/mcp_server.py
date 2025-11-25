@@ -1,6 +1,5 @@
 import asyncio
 import inspect
-from enum import StrEnum
 from typing import (
     Any,
     Awaitable,
@@ -13,6 +12,11 @@ from typing import (
 from pydantic import BaseModel, TypeAdapter
 from aiomcp.contracts.mcp_schema import JsonSchema
 from aiomcp.mcp_flag import McpServerFlags
+from aiomcp.mcp_context import (
+    McpServerContext,
+    McpSession,
+    McpSessionStatus,
+)
 from aiomcp.mcp_schema_resolver import McpSchemaResolver
 from aiomcp.mcp_transport_resolver import McpTransportResolver
 from aiomcp.transports.base import McpServerTransport
@@ -40,35 +44,17 @@ class McpCallableTool(McpTool):
     callable_async: Callable[..., Awaitable]
 
 
-class McpSessionStatus(StrEnum):
-    UNINITIALIZED = "uninitialized"
-    INITIALIZING = "initializing"
-    INITIALIZED = "initialized"
-
-
-class McpSession:
-    def __init__(self, session_id: str) -> None:
-        self.id = session_id
-        self.status: McpSessionStatus = McpSessionStatus.UNINITIALIZED
-        self.inflight: Optional[asyncio.Task] = None
-        self.version: McpVersion = McpVersion()
-
-
 class McpServer:
     def __init__(self, name: str = "aiomcp-server") -> None:
-        self.flags = McpServerFlags()
+        self._context = McpServerContext(McpServerFlags())
         self.name = name
         self._tools: Dict[str, McpCallableTool] = {}
         self._hosting: bool = False  # TODO: remove once enable multiple hosting.
         self._message_loop: Optional[asyncio.Task] = None
         self._server_transport: Optional[McpServerTransport] = None
-        self._sessions: Dict[str, McpSession] = {}
 
     def _get_session(self, session_id: Optional[str]) -> McpSession:
-        session_id = session_id or "default"
-        if session_id not in self._sessions:
-            self._sessions[session_id] = McpSession(session_id)
-        return self._sessions[session_id]
+        return self._context.get_session(session_id)
 
     async def register_tool(
         self,
@@ -138,7 +124,7 @@ class McpServer:
             transport = McpTransportResolver.resolve(transport)
         self._server_transport = transport
 
-        await transport.server_initialize()
+        await transport.server_initialize(self._context)
 
         if self._message_loop is None:
             self._message_loop = asyncio.create_task(
@@ -162,7 +148,7 @@ class McpServer:
             except Exception:
                 pass
 
-        for session in self._sessions.values():
+        for session in self._context.iter_sessions():
             t = session.inflight
             if t:
                 t.cancel()
@@ -202,7 +188,7 @@ class McpServer:
         try:
             method = request.method
 
-            if self.flags.enforce_mcp_initialize_sequence:
+            if self._context.flags.enforce_mcp_initialize_sequence:
                 session = self._get_session(session_id)
                 if (
                     session.status == McpSessionStatus.UNINITIALIZED
@@ -283,12 +269,13 @@ class McpServer:
 
                 session = self._get_session(session_id)
                 protocol_version = session.version.default_version
-                if self.flags.enforce_mcp_version_negotiation:
+                if self._context.flags.enforce_mcp_version_negotiation:
                     client_version = request.params.protocolVersion
                     if client_version:
                         protocol_version = session.version.negotiate(client_version)
 
                 session.status = McpSessionStatus.INITIALIZING
+                session.version.negotiate(protocol_version)
                 result = McpInitializeResult(
                     capabilities={},
                     protocolVersion=protocol_version,
@@ -328,7 +315,7 @@ class McpServer:
                 asyncio.create_task(_handle_request(message, session_id))
             elif isinstance(message, McpInitializedNotification):
                 session = self._get_session(session_id)
-                if self.flags.enforce_mcp_initialize_sequence:
+                if self._context.flags.enforce_mcp_initialize_sequence:
                     if session.status == McpSessionStatus.INITIALIZING:
                         session.status = McpSessionStatus.INITIALIZED
                 else:

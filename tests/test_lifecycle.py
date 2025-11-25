@@ -1,7 +1,8 @@
 import asyncio
 
 import pytest
-from aiomcp.mcp_server import McpServer, McpSessionStatus
+from aiomcp.mcp_server import McpServer
+from aiomcp.mcp_context import McpSessionStatus
 from aiomcp.mcp_client import McpClient
 from aiomcp.transports.memory import McpMemoryTransport
 from aiomcp.contracts.mcp_message import (
@@ -19,7 +20,7 @@ from aiomcp.jsonrpc_error_codes import JsonRpcErrorCodes
 async def test_server_enforce_initialize_sequence():
     async def _run():
         server = McpServer()
-        server.flags.enforce_mcp_initialize_sequence = True
+        server._context.flags.enforce_mcp_initialize_sequence = True
         transport = McpMemoryTransport()
         
         # Start server hosting
@@ -88,7 +89,7 @@ async def test_server_enforce_initialize_sequence():
 async def test_server_version_negotiation():
     async def _run():
         server = McpServer()
-        server.flags.enforce_mcp_version_negotiation = True
+        server._context.flags.enforce_mcp_version_negotiation = True
         transport = McpMemoryTransport()
         await server.create_host_task(transport)
         
@@ -110,7 +111,7 @@ async def test_server_version_negotiation():
         await server.shutdown()
         
         server = McpServer()
-        server.flags.enforce_mcp_version_negotiation = True
+        server._context.flags.enforce_mcp_version_negotiation = True
         transport = McpMemoryTransport()
         host_task = await server.create_host_task(transport)
 
@@ -164,7 +165,7 @@ async def test_client_version_negotiation():
 
         # 1. Client enforces negotiation, server returns unsupported version
         client = McpClient()
-        client.flags.enforce_mcp_version_negotiation = True
+        client._context.flags.enforce_mcp_version_negotiation = True
         transport = MockServerTransport("1.0.0") # Unsupported
         
         server_task = asyncio.create_task(transport.run_server_loop())
@@ -183,7 +184,7 @@ async def test_client_version_negotiation():
 
         # 2. Client enforces negotiation, server returns supported version
         client = McpClient()
-        client.flags.enforce_mcp_version_negotiation = True
+        client._context.flags.enforce_mcp_version_negotiation = True
         transport = MockServerTransport("2025-06-18") # Supported
         
         server_task = asyncio.create_task(transport.run_server_loop())

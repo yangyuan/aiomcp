@@ -9,12 +9,10 @@ from aiomcp.transports.stdio import McpStdioClientTransport
 
 
 async def main() -> None:
-    server_path = os.path.join(os.path.dirname(__file__), "stdio_server.py")
-    transport = McpStdioClientTransport(
-        [sys.executable, server_path],
-    )
+    server_path = os.path.join(os.path.dirname(__file__), "mcp_stdio_server.py")
+    transport = McpStdioClientTransport([sys.executable, server_path])
 
-    client = McpClient("aiomcp-stdio-client")
+    client = McpClient("mcp-stdio-client")
     await client.initialize(transport)
 
     total = await client.invoke("add", {"a": 2, "b": 3})

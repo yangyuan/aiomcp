@@ -26,14 +26,14 @@ async def test_mcp_system_error_validation():
             for msg in self._mock_messages:
                 yield msg
         
-        async def client_initialize(self):
+        async def client_initialize(self, context):
             pass
             
         async def client_send_message(self, message):
             pass
 
     # Case 1: Default behavior (tolerate missing code)
-    client.flags.throw_mcp_contract_errors = False
+    client._context.flags.throw_mcp_contract_errors = False
     error_msg = McpError(id=1, error=McpSystemError())
     
     client._transport = MockTransport([error_msg])
@@ -45,7 +45,7 @@ async def test_mcp_system_error_validation():
         assert "message stream closed unexpectedly" in str(e)
 
     # Case 2: Strict behavior (raise error)
-    client.flags.throw_mcp_contract_errors = True
+    client._context.flags.throw_mcp_contract_errors = True
     error_msg = McpError(id=2, error=McpSystemError())
     
     client._transport = MockTransport([error_msg])

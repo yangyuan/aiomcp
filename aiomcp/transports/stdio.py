@@ -11,6 +11,7 @@ from aiomcp.contracts.mcp_message import (
 )
 from aiomcp.mcp_serialization import McpSerialization
 from aiomcp.transports.base import McpClientTransport, McpServerTransport
+from aiomcp.mcp_context import McpServerContext, McpClientContext
 
 
 
@@ -64,7 +65,7 @@ class McpStdioClientTransport(McpClientTransport):
         self._process = process
         return process.stdout, process.stdin
 
-    async def client_initialize(self):
+    async def client_initialize(self, context: McpClientContext):
         if self._reader is not None and self._writer is not None:
             return
         self._reader, self._writer = await self._spawn_process()
@@ -133,7 +134,7 @@ class McpStdioServerTransport(McpServerTransport):
         self._writer_lock = asyncio.Lock()
         self._closed = False
 
-    async def server_initialize(self):
+    async def server_initialize(self, context: McpServerContext):
         if self._loop is not None:
             return
         self._loop = asyncio.get_running_loop()

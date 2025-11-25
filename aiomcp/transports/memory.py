@@ -3,6 +3,7 @@ from typing import AsyncIterator
 from aiomcp.contracts.mcp_message import McpMessage
 from aiomcp.mcp_serialization import McpSerialization
 from aiomcp.transports.base import McpTransport
+from aiomcp.mcp_context import McpServerContext, McpClientContext
 
 
 class McpMemoryTransport(McpTransport):
@@ -10,7 +11,7 @@ class McpMemoryTransport(McpTransport):
         self._server_to_client: Queue[McpMessage] = Queue()
         self._client_to_server: Queue[McpMessage] = Queue()
 
-    async def client_initialize(self):
+    async def client_initialize(self, context: McpClientContext):
         pass
 
     async def client_messages(self) -> AsyncIterator[McpMessage]:
@@ -23,7 +24,7 @@ class McpMemoryTransport(McpTransport):
         await self._client_to_server.put(message)
         return True
 
-    async def server_initialize(self):
+    async def server_initialize(self, context: McpServerContext):
         pass
 
     async def server_messages(self) -> AsyncIterator[tuple[McpMessage, str | None]]:

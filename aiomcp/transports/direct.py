@@ -8,6 +8,7 @@ from aiomcp.contracts.mcp_message import (
     McpRequest,
     McpResponseOrError,
 )
+from aiomcp.mcp_context import McpClientContext
 from aiomcp.mcp_serialization import McpSerialization
 from aiomcp.transports.base import McpClientTransport
 
@@ -29,7 +30,7 @@ class McpDirectClientTransport(McpClientTransport):
         self._server = server
         self._server_to_client: Queue[McpMessage] = Queue()
 
-    async def client_initialize(self):
+    async def client_initialize(self, context: McpClientContext):
         pass
 
     async def client_messages(self) -> AsyncIterator[McpMessage]:
