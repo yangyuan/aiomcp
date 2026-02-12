@@ -45,7 +45,7 @@ async def _start_stub_http_server(
             "result": {
                 "capabilities": {},
                 "protocolVersion": body_protocol_version
-                or payload.get("params", {}).get("protocolVersion", "2025-06-18"),
+                or payload.get("params", {}).get("protocolVersion", "2025-11-25"),
                 "serverInfo": {"name": "stub", "version": "0.0"},
             },
         }
@@ -143,7 +143,7 @@ async def test_http_transport_numeric_request_id(unused_tcp_port):
         id=123,
         params=McpInitializeParams(
             capabilities={},
-            protocolVersion="2025-06-18",
+            protocolVersion="2025-11-25",
             clientInfo={"name": "test-client", "version": "0.0.0"},
         ),
     )
@@ -161,7 +161,7 @@ async def test_http_transport_numeric_request_id(unused_tcp_port):
 async def test_http_client_requires_session_header(unused_tcp_port):
     port = unused_tcp_port
     runner = await _start_stub_http_server(
-        port, headers={HEADER_MCP_PROTOCOL_VERSION: "2025-06-18"}
+        port, headers={HEADER_MCP_PROTOCOL_VERSION: "2025-11-25"}
     )
     transport = McpHttpClientTransport("127.0.0.1", port, path="/aiomcp")
     context = McpClientContext()
@@ -172,7 +172,7 @@ async def test_http_client_requires_session_header(unused_tcp_port):
         id="session-test",
         params=McpInitializeParams(
             capabilities={},
-            protocolVersion="2025-06-18",
+            protocolVersion="2025-11-25",
             clientInfo={"name": "session-check", "version": "0.0.1"},
         ),
     )
@@ -201,7 +201,7 @@ async def test_http_client_requires_protocol_header(unused_tcp_port):
         id="protocol-test",
         params=McpInitializeParams(
             capabilities={},
-            protocolVersion="2025-06-18",
+            protocolVersion="2025-11-25",
             clientInfo={"name": "protocol-check", "version": "0.0.1"},
         ),
     )
@@ -221,7 +221,7 @@ async def test_http_client_prefers_body_version_over_header(unused_tcp_port):
     runner = await _start_stub_http_server(
         port,
         headers={HEADER_MCP_PROTOCOL_VERSION: "2024-01-01"},
-        body_protocol_version="2025-06-18",
+        body_protocol_version="2025-11-25",
     )
     transport = McpHttpClientTransport("127.0.0.1", port, path="/aiomcp")
     context = McpClientContext()
@@ -239,7 +239,7 @@ async def test_http_client_prefers_body_version_over_header(unused_tcp_port):
     try:
         await transport.client_send_message(initialize_request)
         _ = await asyncio.wait_for(transport._server_to_client.get(), timeout=1)
-        assert context.version.version == "2025-06-18"
+        assert context.version.version == "2025-11-25"
     finally:
         await transport.close()
         await runner.cleanup()
@@ -251,7 +251,7 @@ async def test_http_client_enforces_transport_version_consistency(unused_tcp_por
     runner = await _start_stub_http_server(
         port,
         headers={HEADER_MCP_PROTOCOL_VERSION: "2024-01-01"},
-        body_protocol_version="2025-06-18",
+        body_protocol_version="2025-11-25",
     )
     transport = McpHttpClientTransport("127.0.0.1", port, path="/aiomcp")
     context = McpClientContext()
@@ -312,7 +312,7 @@ async def test_http_server_requires_protocol_header(unused_tcp_port):
         id="proto-server",
         params=McpInitializeParams(
             capabilities={},
-            protocolVersion="2025-06-18",
+            protocolVersion="2025-11-25",
             clientInfo={"name": "server-proto", "version": "0.0.1"},
         ),
     )
@@ -337,7 +337,7 @@ async def test_http_server_requires_protocol_header(unused_tcp_port):
                 headers={
                     HEADER_CONTENT_TYPE: "application/json",
                     HEADER_ACCEPT: "application/json",
-                    HEADER_MCP_PROTOCOL_VERSION: "2025-06-18",
+                    HEADER_MCP_PROTOCOL_VERSION: "2025-11-25",
                 },
             )
             await resp_ok.read()

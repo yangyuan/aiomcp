@@ -1,7 +1,7 @@
 from typing import List, Optional
 
 class McpVersion:
-    LATEST = "2025-06-18"
+    LATEST = "2025-11-25"
     SUPPORTED = [LATEST]
 
     def __init__(self) -> None:

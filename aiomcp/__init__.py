@@ -1,5 +1,9 @@
 from .mcp_client import McpClient
 from .mcp_server import McpServer
+from .mcp_authorization import (
+    McpAuthorizationClient,
+    McpAuthorizationServer,
+)
 
 from .transports.base import McpTransport, McpClientTransport, McpServerTransport
 from .transports.direct import McpDirectTransport, McpDirectClientTransport

@@ -17,6 +17,7 @@ from aiomcp.mcp_context import (
     McpSession,
     McpSessionStatus,
 )
+from aiomcp.mcp_authorization import McpAuthorizationServer
 from aiomcp.mcp_schema_resolver import McpSchemaResolver
 from aiomcp.mcp_transport_resolver import McpTransportResolver
 from aiomcp.transports.base import McpServerTransport
@@ -114,14 +115,19 @@ class McpServer:
         return list(self._tools.values())
 
     async def create_host_task(
-        self, transport: McpServerTransport | str
+        self,
+        transport: McpServerTransport | str,
+        authorization: Optional[McpAuthorizationServer] = None,
     ) -> asyncio.Task:
         if self._hosting:
             raise RuntimeError(f"{McpServer.__name__} is already hosting")
         self._hosting = True
 
         if isinstance(transport, str):
-            transport = McpTransportResolver.resolve(transport)
+            transport = McpTransportResolver.resolve(
+                transport,
+                authorization_server=authorization,
+            )
         self._server_transport = transport
 
         await transport.server_initialize(self._context)
@@ -132,8 +138,12 @@ class McpServer:
             )
         return self._message_loop
 
-    async def host(self, transport: McpServerTransport | str) -> None:
-        await self.create_host_task(transport)
+    async def host(
+        self,
+        transport: McpServerTransport | str,
+        authorization: Optional[McpAuthorizationServer] = None,
+    ) -> None:
+        await self.create_host_task(transport, authorization=authorization)
 
     async def shutdown(self) -> None:
         self._hosting = False
@@ -183,7 +193,9 @@ class McpServer:
                     pass
         return _kwargs
 
-    async def process(self, request: McpRequest, session_id: str | None = None) -> McpResponseOrError:
+    async def process(
+        self, request: McpRequest, session_id: str | None = None
+    ) -> McpResponseOrError:
         """Process a single MCP request and return a response."""
         try:
             method = request.method
@@ -215,7 +227,8 @@ class McpServer:
                     return McpError(
                         id=request.id,
                         error=McpSystemError(
-                            message=f"{McpServer.__name__} request is not a {McpListToolsRequest.__name__}"
+                            code=McpErrorCodes.INVALID_REQUEST,
+                            message=f"{McpServer.__name__} request is not a {McpListToolsRequest.__name__}",
                         ),
                     )
                 result = McpListToolsResult(tools=self._tools.values())
@@ -228,7 +241,8 @@ class McpServer:
                     return McpError(
                         id=request.id,
                         error=McpSystemError(
-                            message=f"{McpServer.__name__} request is not a {McpCallToolRequest.__name__}"
+                            code=McpErrorCodes.INVALID_REQUEST,
+                            message=f"{McpServer.__name__} request is not a {McpCallToolRequest.__name__}",
                         ),
                     )
                 name = request.params.name
@@ -238,7 +252,8 @@ class McpServer:
                     return McpError(
                         id=request.id,
                         error=McpSystemError(
-                            message=f"{McpServer.__name__} tool '{name}' not found"
+                            code=McpErrorCodes.METHOD_NOT_FOUND,
+                            message=f"{McpServer.__name__} tool '{name}' not found",
                         ),
                     )
                 try:
@@ -249,7 +264,11 @@ class McpServer:
                         call_result = call_result.model_dump()
                 except Exception as ex:
                     return McpError(
-                        id=request.id, error=McpSystemError(message=str(ex))
+                        id=request.id,
+                        error=McpSystemError(
+                            code=McpErrorCodes.INTERNAL_ERROR,
+                            message=str(ex),
+                        ),
                     )
                 return McpResponse(
                     id=request.id,
@@ -286,14 +305,16 @@ class McpServer:
                 return McpError(
                     id=request.id,
                     error=McpSystemError(
-                        message=f"{McpServer.__name__} unknown method {method}"
+                        code=McpErrorCodes.METHOD_NOT_FOUND,
+                        message=f"{McpServer.__name__} unknown method {method}",
                     ),
                 )
         except Exception as e:
             return McpError(
                 id=request.id,
                 error=McpSystemError(
-                    message=f"{McpServer.__name__} exception during process: {e}"
+                    code=McpErrorCodes.INTERNAL_ERROR,
+                    message=f"{McpServer.__name__} exception during process: {e}",
                 ),
             )
 

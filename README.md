@@ -70,3 +70,48 @@ mcp_client = McpClient()
 await mcp_client.initialize(transport)
 ```
 
+### Authorization
+
+Connect to an OAuth 2.1 protected remote MCP server.
+
+```python
+from aiomcp import McpClient, McpAuthorizationClient
+
+authorization = await McpAuthorizationClient.discover("http://remote-server/mcp")
+
+# Or use a bearer token
+# authorization = McpAuthorizationClient("your-access-token")
+
+client = McpClient("mcp-client-name")
+await client.initialize("http://remote-server/mcp", authorization=authorization)
+```
+
+Use GitHub as the OAuth provider to connect to GitHub's MCP server.
+
+```python
+from aiomcp import McpClient, McpAuthorizationClient
+
+server_url = "https://api.githubcopilot.com/mcp/"
+
+authorization = await McpAuthorizationClient.discover(
+    server_url,
+    client_id="{YOUR_CLIENT_ID}",
+    client_secret="{YOUR_CLIENT_SECRET}",
+)
+
+client = McpClient("mcp-client-name")
+await client.initialize(server_url, authorization=authorization)
+```
+
+Protect your MCP server with built-in OAuth 2.1 + Dynamic Client Registration.
+
+```python
+from aiomcp import McpServer, McpAuthorizationServer
+
+server = McpServer("mcp-server-name")
+await server.register_tool(add, alias="add")
+
+authorization = McpAuthorizationServer()
+await server.host("http://127.0.0.1:8000/mcp", authorization=authorization)
+```
+

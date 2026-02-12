@@ -20,6 +20,7 @@ from aiomcp.contracts.mcp_message import (
 from aiomcp.mcp_context import McpServerContext, McpClientContext
 from aiomcp.mcp_serialization import McpSerialization
 from aiomcp.mcp_version import McpVersion
+from aiomcp.mcp_authorization import McpAuthorizationClient, McpAuthorizationServer
 from aiomcp.transports.base import McpClientTransport, McpServerTransport, McpTransport
 
 
@@ -35,14 +36,24 @@ CONTENT_TYPE_STREAM = "text/event-stream"
 
 
 class McpHttpClientTransport(McpClientTransport):
-    def __init__(self, hostname: str, port: int, *, path: str = "/") -> None:
+    def __init__(
+        self,
+        hostname: str,
+        port: int,
+        *,
+        path: str = "/",
+        scheme: str = "http",
+        authorization: Optional[McpAuthorizationClient] = None,
+    ) -> None:
         assert path.startswith("/"), "HTTP path must start with '/'"
         self._path = path
-        self._endpoint = f"http://{hostname}:{port}{path}"
+        self._scheme = scheme
+        self._endpoint = f"{scheme}://{hostname}:{port}{path}"
         self._server_to_client: asyncio.Queue[McpMessage] = asyncio.Queue()
         self._initialized: bool = False
         self._session: Optional[aiohttp.ClientSession] = None
         self._context: McpClientContext | None = None
+        self._authorization: Optional[McpAuthorizationClient] = authorization
 
     async def client_initialize(self, context: McpClientContext):
         assert not self._initialized, "HTTP client session is already initialized"
@@ -97,14 +108,17 @@ class McpHttpClientTransport(McpClientTransport):
             HEADER_MCP_PROTOCOL_VERSION: protocol_version,
         }
 
+        if self._authorization is not None:
+            token = await self._authorization.get_access_token()
+            headers["Authorization"] = f"Bearer {token}"
+
         if isinstance(message, McpInitializeRequest):
             headers[HEADER_MCP_PROTOCOL_VERSION] = (
                 message.params.protocolVersion or protocol_version
             )
 
         is_initialize_request = (
-            isinstance(message, McpRequest)
-            and message.method == McpMethod.INITIALIZE
+            isinstance(message, McpRequest) and message.method == McpMethod.INITIALIZE
         )
 
         if context.session_id:
@@ -117,10 +131,7 @@ class McpHttpClientTransport(McpClientTransport):
         ) as response:
             response.raise_for_status()
             protocol_header_value = response.headers.get(HEADER_MCP_PROTOCOL_VERSION)
-            if (
-                context.flags.enforce_mcp_protocol_header
-                and not protocol_header_value
-            ):
+            if context.flags.enforce_mcp_protocol_header and not protocol_header_value:
                 raise RuntimeError(
                     f"{McpHttpClientTransport.__name__} server response missing {HEADER_MCP_PROTOCOL_VERSION}"
                 )
@@ -131,10 +142,7 @@ class McpHttpClientTransport(McpClientTransport):
 
             if is_initialize_request:
                 server_session_id = response.headers.get(HEADER_MCP_SESSION_ID)
-                if (
-                    not server_session_id
-                    and context.flags.enforce_mcp_session_header
-                ):
+                if not server_session_id and context.flags.enforce_mcp_session_header:
                     raise RuntimeError(
                         f"{McpHttpClientTransport.__name__} server did not provide {HEADER_MCP_SESSION_ID} during initialize"
                     )
@@ -178,15 +186,27 @@ class McpHttpClientTransport(McpClientTransport):
 
 
 class McpHttpServerTransport(McpServerTransport):
-    def __init__(self, hostname: str, port: int, *, path: str = "/") -> None:
+    def __init__(
+        self,
+        hostname: str,
+        port: int,
+        *,
+        path: str = "/",
+        authorization: Optional[McpAuthorizationServer] = None,
+    ) -> None:
         assert path.startswith("/"), "HTTP path must start with '/'"
         self._path = path
         self._hostname: str = hostname
         self._port: int = port
         self._runner: Optional[web.AppRunner] = None
-        self._client_to_server: asyncio.Queue[tuple[McpMessage, str | None]] = asyncio.Queue()
-        self._inflight: Dict[tuple[str | None, str], asyncio.Future[McpResponseOrError]] = {}
+        self._client_to_server: asyncio.Queue[tuple[McpMessage, str | None]] = (
+            asyncio.Queue()
+        )
+        self._inflight: Dict[
+            tuple[str | None, str], asyncio.Future[McpResponseOrError]
+        ] = {}
         self._context: McpServerContext | None = None
+        self._authorization: Optional[McpAuthorizationServer] = authorization
 
     async def server_initialize(self, context: McpServerContext):
         if self._runner is not None:
@@ -196,6 +216,9 @@ class McpHttpServerTransport(McpServerTransport):
         self._context = context
         _app = web.Application()
         _app.router.add_post(self._path, self._handle_post)
+        if self._authorization is not None:
+            self._authorization.bind(self._hostname, self._port, self._path)
+            self._authorization.register_routes(_app)
         self._runner = web.AppRunner(_app)
         await self._runner.setup()
         _site = web.TCPSite(self._runner, self._hostname, self._port)
@@ -206,7 +229,9 @@ class McpHttpServerTransport(McpServerTransport):
             message_tuple = await self._client_to_server.get()
             yield message_tuple
 
-    async def server_send_message(self, message: McpMessage, session_id: str | None = None) -> bool:
+    async def server_send_message(
+        self, message: McpMessage, session_id: str | None = None
+    ) -> bool:
         message = McpSerialization.process_server_message(message)
         if isinstance(message, McpResponseOrError):
             request_id = str(message.id)
@@ -225,6 +250,12 @@ class McpHttpServerTransport(McpServerTransport):
             raise RuntimeError(
                 f"{McpHttpServerTransport.__name__} not initialized with context"
             )
+
+        if self._authorization is not None:
+            claims = self._authorization.validate_bearer_token(request)
+            if claims is None:
+                return self._authorization.create_401_response()
+
         request_body = await request.read()
         try:
             message = TypeAdapter(McpClientMessageAnnotated).validate_json(request_body)
@@ -234,7 +265,9 @@ class McpHttpServerTransport(McpServerTransport):
             )
 
         protocol_version_header = request.headers.get(HEADER_MCP_PROTOCOL_VERSION)
-        protocol_version_header = protocol_version_header.strip() if protocol_version_header else ""
+        protocol_version_header = (
+            protocol_version_header.strip() if protocol_version_header else ""
+        )
 
         flags = self._context.flags
 
@@ -244,7 +277,10 @@ class McpHttpServerTransport(McpServerTransport):
                 text=f"{HEADER_MCP_PROTOCOL_VERSION} header required",
             )
 
-        if protocol_version_header and protocol_version_header not in SUPPORTED_PROTOCOL_VERSIONS:
+        if (
+            protocol_version_header
+            and protocol_version_header not in SUPPORTED_PROTOCOL_VERSIONS
+        ):
             return web.Response(
                 status=400,
                 text=f"Unsupported {HEADER_MCP_PROTOCOL_VERSION}: {protocol_version_header}",
@@ -298,12 +334,21 @@ class McpHttpServerTransport(McpServerTransport):
 
 
 class McpHttpTransport(McpTransport):
-    def __init__(self, hostname: str, port: int, path: str = "/") -> None:
+    def __init__(
+        self,
+        hostname: str,
+        port: int,
+        path: str = "/",
+        *,
+        scheme: str = "http",
+        authorization_client: Optional[McpAuthorizationClient] = None,
+        authorization_server: Optional[McpAuthorizationServer] = None,
+    ) -> None:
         self._client: McpHttpClientTransport = McpHttpClientTransport(
-            hostname, port, path=path
+            hostname, port, path=path, scheme=scheme, authorization=authorization_client
         )
         self._server: McpHttpServerTransport = McpHttpServerTransport(
-            hostname, port, path=path
+            hostname, port, path=path, authorization=authorization_server
         )
 
     async def client_initialize(self, context: McpClientContext):
@@ -323,7 +368,9 @@ class McpHttpTransport(McpTransport):
         async for message in self._server.server_messages():
             yield message
 
-    async def server_send_message(self, message: McpMessage, session_id: str | None = None) -> bool:
+    async def server_send_message(
+        self, message: McpMessage, session_id: str | None = None
+    ) -> bool:
         return await self._server.server_send_message(message, session_id)
 
     async def close(self):

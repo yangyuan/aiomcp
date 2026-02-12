@@ -6,6 +6,7 @@ from aiomcp.contracts.mcp_schema import JsonSchemaType
 from aiomcp.mcp_context import McpClientContext
 from aiomcp.mcp_server import McpServer
 from aiomcp.mcp_transport_resolver import McpTransportResolver
+from aiomcp.mcp_authorization import McpAuthorizationClient
 from aiomcp.transports.base import McpClientTransport
 from aiomcp.transports.direct import McpDirectClientTransport
 from aiomcp.contracts.mcp_tool import McpTool
@@ -47,7 +48,11 @@ class McpClient:
         )
         await self._transport.client_send_message(notification)
 
-    async def initialize(self, transport: McpClientTransport | McpServer | str) -> None:
+    async def initialize(
+        self,
+        transport: McpClientTransport | McpServer | str,
+        authorization: McpAuthorizationClient | None = None,
+    ) -> None:
         if self._initialized:
             # TODO: lock instead?
             raise RuntimeError(f"{McpClient.__name__} is already initialized")
@@ -56,7 +61,9 @@ class McpClient:
             if isinstance(transport, McpServer):
                 transport = McpDirectClientTransport(transport)
             elif isinstance(transport, str):
-                transport = McpTransportResolver.resolve(transport)
+                transport = McpTransportResolver.resolve(
+                    transport, authorization_client=authorization
+                )
                 self._transport = transport
         self._transport = transport
 
@@ -190,7 +197,7 @@ class McpClient:
                 # TODO: add input schema validation (for each field)
                 if tool.inputSchema.type != JsonSchemaType.OBJECT:
                     raise RuntimeError(
-                        "{McpClient.__name__} Input schema must be an object"
+                        f"{McpClient.__name__} Input schema must be an object"
                     )
             except Exception as e:
                 raise RuntimeError(

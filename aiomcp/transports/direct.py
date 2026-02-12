@@ -10,6 +10,7 @@ from aiomcp.contracts.mcp_message import (
 )
 from aiomcp.mcp_context import McpClientContext
 from aiomcp.mcp_serialization import McpSerialization
+from aiomcp.jsonrpc_error_codes import JsonRpcErrorCodes as McpErrorCodes
 from aiomcp.transports.base import McpClientTransport
 
 
@@ -50,6 +51,7 @@ class McpDirectClientTransport(McpClientTransport):
                     McpError(
                         id=message.id,
                         error=McpSystemError(
+                            code=McpErrorCodes.INTERNAL_ERROR,
                             message=f"{McpDirectClientTransport.__name__} processing request error: {e}"
                         ),
                     )

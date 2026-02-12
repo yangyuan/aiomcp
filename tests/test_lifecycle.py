@@ -42,7 +42,7 @@ async def test_server_enforce_initialize_sequence():
             id=req_id,
             params=McpInitializeParams(
                 capabilities={},
-                protocolVersion="2025-06-18",
+                protocolVersion="2025-11-25",
                 clientInfo={"name": "test", "version": "1.0"}
             )
         )
@@ -99,13 +99,13 @@ async def test_server_version_negotiation():
             id=req_id,
             params=McpInitializeParams(
                 capabilities={},
-                protocolVersion="2025-06-18",
+                protocolVersion="2025-11-25",
                 clientInfo={"name": "test", "version": "1.0"}
             )
         )
         await transport.client_send_message(init_req)
         response = await transport._server_to_client.get()
-        assert response.result["protocolVersion"] == "2025-06-18"
+        assert response.result["protocolVersion"] == "2025-11-25"
         
         # Reset server for next test
         await server.shutdown()
@@ -128,7 +128,7 @@ async def test_server_version_negotiation():
         await transport.client_send_message(init_req)
         response = await transport._server_to_client.get()
         # Should fall back to latest supported
-        assert response.result["protocolVersion"] == "2025-06-18"
+        assert response.result["protocolVersion"] == "2025-11-25"
         
         await server.shutdown()
 
@@ -185,7 +185,7 @@ async def test_client_version_negotiation():
         # 2. Client enforces negotiation, server returns supported version
         client = McpClient()
         client._context.flags.enforce_mcp_version_negotiation = True
-        transport = MockServerTransport("2025-06-18") # Supported
+        transport = MockServerTransport("2025-11-25") # Supported
         
         server_task = asyncio.create_task(transport.run_server_loop())
         
