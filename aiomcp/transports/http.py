@@ -23,7 +23,6 @@ from aiomcp.mcp_version import McpVersion
 from aiomcp.mcp_authorization import McpAuthorizationClient, McpAuthorizationServer
 from aiomcp.transports.base import McpClientTransport, McpServerTransport, McpTransport
 
-
 HEADER_CONTENT_TYPE = "content-type"
 HEADER_ACCEPT = "accept"
 HEADER_MCP_SESSION_ID = "mcp-session-id"

@@ -52,7 +52,7 @@ class McpDirectClientTransport(McpClientTransport):
                         id=message.id,
                         error=McpSystemError(
                             code=McpErrorCodes.INTERNAL_ERROR,
-                            message=f"{McpDirectClientTransport.__name__} processing request error: {e}"
+                            message=f"{McpDirectClientTransport.__name__} processing request error: {e}",
                         ),
                     )
                 )

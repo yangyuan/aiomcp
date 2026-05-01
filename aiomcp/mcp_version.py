@@ -1,5 +1,6 @@
 from typing import List, Optional
 
+
 class McpVersion:
     LATEST = "2025-11-25"
     SUPPORTED = [LATEST]

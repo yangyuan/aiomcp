@@ -1,4 +1,6 @@
 import asyncio
+import sys
+from typing import AsyncIterator
 
 import aiohttp
 from aiohttp import web
@@ -20,7 +22,7 @@ from aiomcp.transports.base import McpClientTransport
 from aiomcp.transports.direct import McpDirectTransport
 from aiomcp.transports.memory import McpMemoryTransport
 from aiomcp.transports.http import McpHttpClientTransport, McpHttpTransport
-
+from aiomcp.transports.stdio import McpStdioClientTransport
 
 HEADER_CONTENT_TYPE = "content-type"
 HEADER_ACCEPT = "accept"
@@ -101,6 +103,126 @@ async def _client_driven_validation(
         await server.shutdown()
 
 
+class SilentClientTransport(McpClientTransport):
+    async def client_initialize(self, context: McpClientContext):
+        pass
+
+    async def client_messages(self) -> AsyncIterator:
+        await asyncio.Event().wait()
+        if False:
+            yield
+
+    async def client_send_message(self, message) -> bool:
+        return True
+
+    async def close(self):
+        pass
+
+
+class ControlledClosingClientTransport(McpClientTransport):
+    def __init__(self) -> None:
+        self.started = asyncio.Event()
+        self.sent = asyncio.Event()
+        self.close_stream = asyncio.Event()
+
+    async def client_initialize(self, context: McpClientContext):
+        pass
+
+    async def client_messages(self) -> AsyncIterator:
+        self.started.set()
+        await self.close_stream.wait()
+        if False:
+            yield
+
+    async def client_send_message(self, message) -> bool:
+        self.sent.set()
+        return True
+
+    async def close(self):
+        self.close_stream.set()
+
+
+@pytest.mark.asyncio
+async def test_client_request_timeout_cleans_inflight():
+    client = McpClient(request_timeout=0.01)
+    client._transport = SilentClientTransport()
+    request = McpListToolsRequest(id="timeout-test")
+
+    with pytest.raises(TimeoutError):
+        await client._process(request)
+
+    assert "timeout-test" not in client._inflight
+
+
+@pytest.mark.asyncio
+async def test_client_fails_pending_request_when_message_stream_closes():
+    transport = ControlledClosingClientTransport()
+    client = McpClient(request_timeout=5)
+    client._transport = transport
+    client._message_loop = asyncio.create_task(client._handle_message_loop())
+
+    await transport.started.wait()
+    process_task = asyncio.create_task(
+        client._process(McpListToolsRequest(id="pending"))
+    )
+    await transport.sent.wait()
+    transport.close_stream.set()
+
+    with pytest.raises(RuntimeError, match="message stream closed"):
+        await process_task
+
+    assert client._inflight == {}
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_stdio_client_drains_child_stderr():
+    code = (
+        "import json, sys; "
+        "sys.stderr.write('x' * 200000); sys.stderr.flush(); "
+        "print(json.dumps({'jsonrpc': '2.0', 'id': 'ready', 'result': {}}), flush=True)"
+    )
+    transport = McpStdioClientTransport([sys.executable, "-c", code])
+    await transport.client_initialize(McpClientContext())
+
+    try:
+        message = await asyncio.wait_for(anext(transport.client_messages()), timeout=2)
+        assert isinstance(message, McpResponse)
+        assert message.id == "ready"
+    finally:
+        await transport.close()
+
+
+@pytest.mark.asyncio
+async def test_stdio_client_rejects_write_after_child_exit():
+    transport = McpStdioClientTransport([sys.executable, "-c", "pass"])
+    await transport.client_initialize(McpClientContext())
+
+    try:
+        assert transport._process is not None
+        await asyncio.wait_for(transport._process.wait(), timeout=2)
+        with pytest.raises(RuntimeError, match="already exited"):
+            await transport.client_send_message(McpListToolsRequest(id="dead"))
+    finally:
+        await transport.close()
+
+
+@pytest.mark.asyncio
+async def test_stdio_client_close_sends_stdin_eof_before_terminating(tmp_path):
+    marker = tmp_path / "stdin-closed.txt"
+    code = (
+        "import pathlib, sys; "
+        "sys.stdin.read(); "
+        f"pathlib.Path({str(marker)!r}).write_text('closed')"
+    )
+    transport = McpStdioClientTransport([sys.executable, "-c", code])
+    await transport.client_initialize(McpClientContext())
+
+    await transport.close()
+
+    assert marker.read_text() == "closed"
+
+
 @pytest.mark.asyncio
 async def test_direct_transport():
     mcp_server = McpServer()
@@ -149,7 +271,9 @@ async def test_http_transport_numeric_request_id(unused_tcp_port):
     )
 
     await client_transport.client_send_message(initialize_request)
-    response = await asyncio.wait_for(client_transport._server_to_client.get(), timeout=1)
+    response = await asyncio.wait_for(
+        client_transport._server_to_client.get(), timeout=1
+    )
 
     assert isinstance(response, McpResponse)
     assert response.id == 123

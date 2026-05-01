@@ -14,7 +14,6 @@ from aiomcp.transports.base import McpClientTransport, McpServerTransport
 from aiomcp.mcp_context import McpServerContext, McpClientContext
 
 
-
 class McpStdioClientTransport(McpClientTransport):
     def __init__(
         self,
@@ -29,6 +28,8 @@ class McpStdioClientTransport(McpClientTransport):
         self._process: Optional[asyncio.subprocess.Process] = None
         self._reader: Optional[asyncio.StreamReader] = None
         self._writer: Optional[asyncio.StreamWriter] = None
+        self._stderr_task: Optional[asyncio.Task[None]] = None
+        self._closing = False
 
     async def _spawn_process(self) -> Tuple[asyncio.StreamReader, asyncio.StreamWriter]:
         if self._shell:
@@ -45,6 +46,7 @@ class McpStdioClientTransport(McpClientTransport):
                 cmd_str,
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
                 cwd=self._cwd,
             )
         else:
@@ -56,18 +58,30 @@ class McpStdioClientTransport(McpClientTransport):
                 *args,
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
                 cwd=self._cwd,
             )
-        if process.stdout is None or process.stdin is None:
+        if process.stdout is None or process.stdin is None or process.stderr is None:
             raise RuntimeError(
                 f"{McpStdioClientTransport.__name__} failed to start stdio process"
             )
         self._process = process
+        self._stderr_task = asyncio.create_task(self._drain_stderr(process.stderr))
         return process.stdout, process.stdin
+
+    async def _drain_stderr(self, stderr: asyncio.StreamReader) -> None:
+        try:
+            while await stderr.read(4096):
+                pass
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            pass
 
     async def client_initialize(self, context: McpClientContext):
         if self._reader is not None and self._writer is not None:
             return
+        self._closing = False
         self._reader, self._writer = await self._spawn_process()
 
     async def client_messages(self) -> AsyncIterator[McpMessage]:
@@ -83,20 +97,48 @@ class McpStdioClientTransport(McpClientTransport):
             except ValidationError:
                 continue
             yield message
+        if self._closing:
+            return
+        proc = self._process
+        if proc is not None and proc.returncode is None:
+            await proc.wait()
+        returncode = proc.returncode if proc is not None else None
+        raise RuntimeError(
+            f"{McpStdioClientTransport.__name__} stdio process exited with code {returncode}"
+        )
 
     async def client_send_message(self, message: McpMessage) -> bool:
-        assert self._writer is not None, "Client not initialized"
+        writer = self._writer
+        proc = self._process
+        if writer is None:
+            raise RuntimeError(
+                f"{McpStdioClientTransport.__name__} client not initialized"
+            )
+        if proc is not None and proc.returncode is not None:
+            raise RuntimeError(
+                f"{McpStdioClientTransport.__name__} stdio process already exited with code {proc.returncode}"
+            )
+        if writer.is_closing():
+            raise RuntimeError(f"{McpStdioClientTransport.__name__} stdin is closed")
         message = McpSerialization.process_client_message(message)
         payload = message.model_dump_json(exclude_none=True).encode("utf-8") + b"\n"
-        self._writer.write(payload)
-        await self._writer.drain()
+        try:
+            writer.write(payload)
+            await writer.drain()
+        except (BrokenPipeError, ConnectionResetError, OSError, RuntimeError) as exc:
+            raise RuntimeError(
+                f"{McpStdioClientTransport.__name__} failed to write to stdio process"
+            ) from exc
         return True
 
     async def close(self):
+        self._closing = True
         reader = self._reader
         writer = self._writer
+        stderr_task = self._stderr_task
         self._reader = None
         self._writer = None
+        self._stderr_task = None
         if writer is not None:
             try:
                 writer.close()
@@ -112,6 +154,11 @@ class McpStdioClientTransport(McpClientTransport):
         self._process = None
         if proc is not None and proc.returncode is None:
             try:
+                await asyncio.wait_for(proc.wait(), timeout=3)
+            except Exception:
+                pass
+        if proc is not None and proc.returncode is None:
+            try:
                 proc.terminate()
             except Exception:
                 pass
@@ -122,6 +169,19 @@ class McpStdioClientTransport(McpClientTransport):
                     proc.kill()
                 except Exception:
                     pass
+                try:
+                    await proc.wait()
+                except Exception:
+                    pass
+        if stderr_task is not None:
+            if not stderr_task.done():
+                stderr_task.cancel()
+            try:
+                await stderr_task
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                pass
 
 
 class McpStdioServerTransport(McpServerTransport):

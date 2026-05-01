@@ -29,13 +29,16 @@ from aiomcp.contracts.mcp_message import (
 
 
 class McpClient:
-    def __init__(self, name: str = "aiomcp-client") -> None:
+    def __init__(
+        self, name: str = "aiomcp-client", request_timeout: float | None = 60.0
+    ) -> None:
         self._context = McpClientContext()
         self.name = name
+        self.request_timeout = request_timeout
         self._initialized = False
         self._transport: McpClientTransport | None = None
         self._tools: Dict[str, McpTool] = {}
-        self._inflight: Dict[str, asyncio.Future[McpResponseOrError]] = {}
+        self._inflight: Dict[int | str, asyncio.Future[McpResponseOrError]] = {}
         self._message_loop: asyncio.Task | None = None
 
     def _generate_request_id(self) -> str:
@@ -109,30 +112,78 @@ class McpClient:
                 )
 
     async def _handle_message_loop(self) -> None:
-        # TODO: _inflight management, graceful shutdown, etc.
-        async for msg in self._transport.client_messages():
-            if isinstance(msg, McpResponseOrError):
-                self._validate_system_error(msg)
-                if msg.id in self._inflight:
-                    self._inflight[msg.id].set_result(msg)
-                    del self._inflight[msg.id]
-                else:
-                    pass
-            # TODO: save responses for other ids, handle other notifications, etc.
-        raise RuntimeError(f"{McpClient.__name__} message stream closed unexpectedly")
+        transport = self._transport
+        if transport is None:
+            self._fail_inflight(
+                RuntimeError(f"{McpClient.__name__} transport is closed")
+            )
+            return
+
+        try:
+            async for msg in transport.client_messages():
+                if isinstance(msg, McpResponseOrError):
+                    self._validate_system_error(msg)
+                    future = self._inflight.pop(msg.id, None)
+                    if future is not None and not future.done():
+                        future.set_result(msg)
+                # TODO: save responses for other ids, handle other notifications, etc.
+        except asyncio.CancelledError:
+            self._fail_inflight(
+                RuntimeError(f"{McpClient.__name__} message loop was cancelled")
+            )
+            raise
+        except Exception as exc:
+            self._fail_inflight(
+                RuntimeError(f"{McpClient.__name__} message loop failed: {exc}")
+            )
+        else:
+            self._fail_inflight(
+                RuntimeError(f"{McpClient.__name__} message stream closed unexpectedly")
+            )
+
+    def _fail_inflight(self, exc: BaseException) -> None:
+        pending = list(self._inflight.values())
+        self._inflight.clear()
+        for future in pending:
+            if not future.done():
+                future.set_exception(exc)
 
     async def _generate_response_future(
-        self, request_id: str
+        self, request_id: int | str
     ) -> asyncio.Future[McpResponseOrError]:
-        future = asyncio.Future()
-        # TODO: what if already exists?
+        existing = self._inflight.get(request_id)
+        if existing is not None and not existing.done():
+            raise RuntimeError(
+                f"{McpClient.__name__} already has an inflight request with ID {request_id!r}"
+            )
+        future = asyncio.get_running_loop().create_future()
         self._inflight[request_id] = future
         return future
 
-    async def _process(self, request: McpRequest) -> McpResponseOrError:
+    async def _process(
+        self, request: McpRequest, timeout: float | None = None
+    ) -> McpResponseOrError:
+        transport = self._transport
+        if transport is None:
+            raise RuntimeError(f"{McpClient.__name__} transport is closed")
+        if self._message_loop is not None and self._message_loop.done():
+            raise RuntimeError(f"{McpClient.__name__} message loop is not running")
+
         future = await self._generate_response_future(request.id)
-        await self._transport.client_send_message(request)
-        return await future
+        request_timeout = self.request_timeout if timeout is None else timeout
+        try:
+            await transport.client_send_message(request)
+            if request_timeout is None:
+                return await future
+            return await asyncio.wait_for(future, timeout=request_timeout)
+        except asyncio.TimeoutError as exc:
+            self._inflight.pop(request.id, None)
+            raise TimeoutError(
+                f"{McpClient.__name__} request {request.method!s} with ID {request.id!r} timed out after {request_timeout} seconds"
+            ) from exc
+        except Exception:
+            self._inflight.pop(request.id, None)
+            raise
 
     async def _initialize_server(self) -> McpInitializeResult:
         request_id = self._generate_request_id()
@@ -189,6 +240,7 @@ class McpClient:
         tool: McpTool,
         request: McpCallToolRequest,
         bypass_client_validation: bool = False,
+        timeout: float | None = None,
     ) -> McpResponseOrError:
         self._check_initialized()
 
@@ -204,7 +256,7 @@ class McpClient:
                     f"{McpClient.__name__} input validation failed for tool '{tool.name}': {e}"
                 )
 
-        response = await self._process(request)
+        response = await self._process(request, timeout=timeout)
 
         if (
             isinstance(response, McpResponse)
@@ -221,7 +273,9 @@ class McpClient:
 
         return response
 
-    async def invoke(self, tool_name: str, arguments: Dict[str, Any]) -> Any:
+    async def invoke(
+        self, tool_name: str, arguments: Dict[str, Any], timeout: float | None = None
+    ) -> Any:
         self._check_initialized()
         tool = self._tools.get(tool_name)
         if tool is None:
@@ -233,7 +287,7 @@ class McpClient:
             params=McpCallToolParams(name=tool.name, arguments=arguments),
         )
 
-        response = await self.mcp_tools_call(tool, request)
+        response = await self.mcp_tools_call(tool, request, timeout=timeout)
 
         if isinstance(response, McpError):
             raise RuntimeError(
