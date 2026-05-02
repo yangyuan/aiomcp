@@ -4,6 +4,7 @@ import uuid
 from typing import Any, Dict, List
 from aiomcp.contracts.mcp_schema import JsonSchemaType
 from aiomcp.mcp_context import McpClientContext
+from aiomcp.mcp_flag import McpClientFlags
 from aiomcp.mcp_server import McpServer
 from aiomcp.mcp_transport_resolver import McpTransportResolver
 from aiomcp.mcp_authorization import McpAuthorizationClient
@@ -29,19 +30,25 @@ from aiomcp.contracts.mcp_message import (
     McpListToolsParams,
     McpServerRequest,
     McpSystemError,
+    McpCancelledNotification,
+    McpCancelledNotificationParams,
 )
 
 
 class McpClient:
     def __init__(
-        self, name: str = "aiomcp-client", request_timeout: float | None = 60.0
+        self,
+        name: str = "aiomcp-client",
+        request_timeout: float | None = 60.0,
+        flags: Dict[str, bool] | None = None,
     ) -> None:
-        self._context = McpClientContext()
+        self._context = McpClientContext(McpClientFlags.model_validate(flags or {}))
         self.name = name
         self.request_timeout = request_timeout
         self._initialized = False
         self._transport: McpClientTransport | None = None
         self._tools: Dict[str, McpTool] = {}
+        self._server_capabilities: Dict[str, Any] = {}
         self._inflight: Dict[int | str, asyncio.Future[McpResponseOrError]] = {}
         self._message_loop: asyncio.Task | None = None
 
@@ -78,7 +85,13 @@ class McpClient:
         self._message_loop = asyncio.create_task(self._handle_message_loop())
         _ = await self._initialize_server()
         await self._notify_initialized()
-        await self._refresh_tools()
+        if (
+            "tools" in self._server_capabilities
+            or not self._context.flags.enforce_mcp_tools_capability
+        ):
+            await self._refresh_tools()
+        else:
+            self._tools = {}
         self._initialized = True
 
     async def close(self) -> None:
@@ -174,6 +187,25 @@ class McpClient:
             if not future.done():
                 future.set_exception(exc)
 
+    async def _notify_cancelled(
+        self, request: McpRequest, request_timeout: float | None
+    ) -> None:
+        transport = self._transport
+        if transport is None or request.method == McpMethod.INITIALIZE:
+            return
+        reason = (
+            f"Request timed out after {request_timeout} seconds"
+            if request_timeout is not None
+            else "Request cancelled"
+        )
+        notification = McpCancelledNotification(
+            params=McpCancelledNotificationParams(requestId=request.id, reason=reason)
+        )
+        try:
+            await transport.client_send_message(notification)
+        except Exception:
+            pass
+
     async def _generate_response_future(
         self, request_id: int | str
     ) -> asyncio.Future[McpResponseOrError]:
@@ -206,6 +238,7 @@ class McpClient:
             return await asyncio.wait_for(future, timeout=request_timeout)
         except asyncio.TimeoutError as exc:
             self._inflight.pop(request.id, None)
+            await self._notify_cancelled(request, request_timeout)
             raise TimeoutError(
                 f"{McpClient.__name__} request {request.method!s} with ID {request.id!r} timed out after {request_timeout} seconds"
             ) from exc
@@ -240,6 +273,7 @@ class McpClient:
             enforce_negotiation=self._context.flags.enforce_mcp_version_negotiation,
             enforce_consistency=self._context.flags.enforce_mcp_transport_version_consistency,
         )
+        self._server_capabilities = structured.capabilities or {}
 
         return structured
 
@@ -319,6 +353,10 @@ class McpClient:
         self, tool_name: str, arguments: Dict[str, Any], timeout: float | None = None
     ) -> Any:
         structured = await self.invoke_result(tool_name, arguments, timeout=timeout)
+        if structured.isError:
+            raise RuntimeError(
+                f"{McpClient.__name__} tool '{tool_name}' returned an error: {self._coerce_tool_result(structured)!r}"
+            )
         return self._coerce_tool_result(structured)
 
     async def invoke_result(
@@ -345,6 +383,13 @@ class McpClient:
             structured = McpCallToolResult.model_validate(response.result)
         except Exception as e:
             raise RuntimeError(f"{McpClient.__name__} failed to parse tool result: {e}")
+        if (
+            self._context.flags.enforce_mcp_tool_result_content
+            and structured.content is None
+        ):
+            raise RuntimeError(
+                f"{McpClient.__name__} tool result missing required content"
+            )
         return structured
 
     def _coerce_tool_result(self, structured: McpCallToolResult) -> Any:

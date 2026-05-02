@@ -10,10 +10,13 @@ from pydantic import BaseModel
 
 from aiomcp.mcp_server import McpServer
 from aiomcp.mcp_client import McpClient
-from aiomcp.mcp_context import McpClientContext
+from aiomcp.mcp_context import McpClientContext, McpServerContext
 from aiomcp.contracts.mcp_message import (
     McpCallToolParams,
     McpCallToolRequest,
+    McpCallToolResult,
+    McpCancelledNotification,
+    McpCancelledNotificationParams,
     McpError,
     McpInitializeParams,
     McpInitializeRequest,
@@ -30,7 +33,11 @@ from aiomcp.jsonrpc_error_codes import JsonRpcErrorCodes
 from aiomcp.transports.base import McpClientTransport
 from aiomcp.transports.direct import McpDirectTransport
 from aiomcp.transports.memory import McpMemoryTransport
-from aiomcp.transports.http import McpHttpClientTransport, McpHttpTransport
+from aiomcp.transports.http import (
+    McpHttpClientTransport,
+    McpHttpServerTransport,
+    McpHttpTransport,
+)
 from aiomcp.transports.stdio import McpStdioClientTransport
 
 HEADER_CONTENT_TYPE = "content-type"
@@ -103,6 +110,160 @@ async def _start_sse_http_server(port: int) -> web.AppRunner:
     return runner
 
 
+async def _start_session_expiry_http_server(
+    port: int, records: list[tuple[str, str | None]]
+) -> web.AppRunner:
+    app = web.Application()
+    initialized_once = False
+
+    async def _handle(request: web.Request) -> web.Response:
+        nonlocal initialized_once
+        payload = await request.json()
+        method = payload.get("method")
+        session_id = request.headers.get(HEADER_MCP_SESSION_ID)
+        records.append((method or "response", session_id))
+
+        if method == "initialize":
+            next_session_id = (
+                "expired-session" if not initialized_once else "fresh-session"
+            )
+            initialized_once = True
+            response = {
+                "jsonrpc": "2.0",
+                "id": payload.get("id"),
+                "result": {
+                    "capabilities": {},
+                    "protocolVersion": "2025-11-25",
+                    "serverInfo": {"name": "session", "version": "0.0"},
+                },
+            }
+            return web.json_response(
+                response,
+                headers={
+                    HEADER_MCP_SESSION_ID: next_session_id,
+                    HEADER_MCP_PROTOCOL_VERSION: "2025-11-25",
+                },
+            )
+
+        if method == "tools/list" and session_id == "expired-session":
+            return web.Response(status=404)
+
+        if method == "tools/list":
+            response = {
+                "jsonrpc": "2.0",
+                "id": payload.get("id"),
+                "result": {"tools": []},
+            }
+            return web.json_response(
+                response, headers={HEADER_MCP_PROTOCOL_VERSION: "2025-11-25"}
+            )
+
+        return web.Response(
+            status=202, headers={HEADER_MCP_PROTOCOL_VERSION: "2025-11-25"}
+        )
+
+    app.router.add_post("/aiomcp", _handle)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "127.0.0.1", port)
+    await site.start()
+    return runner
+
+
+async def _start_resumable_sse_http_server(
+    port: int, last_event_ids: list[str | None]
+) -> web.AppRunner:
+    app = web.Application()
+    request_id: str | int | None = None
+
+    async def _handle_post(request: web.Request) -> web.Response:
+        nonlocal request_id
+        payload = await request.json()
+        request_id = payload.get("id")
+        body = "".join(
+            [
+                "id: post-1\n",
+                "retry: 1\n",
+                'data: {"jsonrpc":"2.0","method":"notifications/progress","params":{"progress":0.25}}\n\n',
+            ]
+        )
+        return web.Response(
+            body=body.encode("utf-8"),
+            headers={
+                HEADER_CONTENT_TYPE: "text/event-stream",
+                HEADER_MCP_PROTOCOL_VERSION: "2025-11-25",
+            },
+        )
+
+    async def _handle_get(request: web.Request) -> web.Response:
+        last_event_ids.append(request.headers.get("last-event-id"))
+        response_payload = json.dumps(
+            {"jsonrpc": "2.0", "id": request_id, "result": {"tools": []}}
+        )
+        body = f"id: get-1\ndata: {response_payload}\n\n"
+        return web.Response(
+            body=body.encode("utf-8"),
+            headers={
+                HEADER_CONTENT_TYPE: "text/event-stream",
+                HEADER_MCP_PROTOCOL_VERSION: "2025-11-25",
+            },
+        )
+
+    app.router.add_post("/aiomcp", _handle_post)
+    app.router.add_get("/aiomcp", _handle_get)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "127.0.0.1", port)
+    await site.start()
+    return runner
+
+
+async def _start_get_sse_http_server(port: int) -> web.AppRunner:
+    app = web.Application()
+
+    async def _handle_post(request: web.Request) -> web.Response:
+        payload = await request.json()
+        response = {
+            "jsonrpc": "2.0",
+            "id": payload.get("id"),
+            "result": {
+                "capabilities": {},
+                "protocolVersion": "2025-11-25",
+                "serverInfo": {"name": "get-sse", "version": "0.0"},
+            },
+        }
+        return web.json_response(
+            response,
+            headers={
+                HEADER_MCP_SESSION_ID: "get-session",
+                HEADER_MCP_PROTOCOL_VERSION: "2025-11-25",
+            },
+        )
+
+    async def _handle_get(request: web.Request) -> web.Response:
+        body = "".join(
+            [
+                "id: get-channel-1\n",
+                'data: {"jsonrpc":"2.0","method":"notifications/tools/list_changed"}\n\n',
+            ]
+        )
+        return web.Response(
+            body=body.encode("utf-8"),
+            headers={
+                HEADER_CONTENT_TYPE: "text/event-stream",
+                HEADER_MCP_PROTOCOL_VERSION: "2025-11-25",
+            },
+        )
+
+    app.router.add_post("/aiomcp", _handle_post)
+    app.router.add_get("/aiomcp", _handle_get)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "127.0.0.1", port)
+    await site.start()
+    return runner
+
+
 class EchoInput(BaseModel):
     text: str
 
@@ -137,6 +298,8 @@ async def _client_driven_validation(
         resp = await client.mcp_tools_call(echo_tool_def, request)
         assert isinstance(resp, McpResponse)
         assert resp.result["structuredContent"] == {"text": "hello"}
+        assert resp.result["content"] == [{"type": "text", "text": '{"text": "hello"}'}]
+        assert resp.result["isError"] is False
 
         result = await client.invoke("echo", {"text": "hello"})
         assert result == {"text": "hello"}
@@ -145,7 +308,34 @@ async def _client_driven_validation(
         await server.shutdown()
 
 
+async def structured_content_only_tool():
+    return McpCallToolResult(structuredContent={"value": 42})
+
+
+@pytest.mark.asyncio
+async def test_structured_content_only_tool_result_fills_content():
+    server = McpServer()
+    await server.mcp_tools_register("structured", structured_content_only_tool, {})
+
+    response = await server.process(
+        McpCallToolRequest(
+            id="structured",
+            params=McpCallToolParams(name="structured", arguments={}),
+        )
+    )
+
+    assert isinstance(response, McpResponse)
+    assert response.result == {
+        "content": [{"type": "text", "text": '{"value": 42}'}],
+        "isError": False,
+        "structuredContent": {"value": 42},
+    }
+
+
 class SilentClientTransport(McpClientTransport):
+    def __init__(self) -> None:
+        self.sent = []
+
     async def client_initialize(self, context: McpClientContext):
         pass
 
@@ -155,6 +345,7 @@ class SilentClientTransport(McpClientTransport):
             yield
 
     async def client_send_message(self, message) -> bool:
+        self.sent.append(message)
         return True
 
     async def close(self):
@@ -216,7 +407,7 @@ class PaginatedToolsTransport(QueueClientTransport):
         self.sent.append(message)
         if isinstance(message, McpInitializeRequest):
             result = McpInitializeResult(
-                capabilities={},
+                capabilities={"tools": {}},
                 protocolVersion="2025-11-25",
                 serverInfo={"name": "paged", "version": "0.0"},
             )
@@ -240,14 +431,17 @@ class PaginatedToolsTransport(QueueClientTransport):
 
 @pytest.mark.asyncio
 async def test_client_request_timeout_cleans_inflight():
+    transport = SilentClientTransport()
     client = McpClient(request_timeout=0.01)
-    client._transport = SilentClientTransport()
+    client._transport = transport
     request = McpListToolsRequest(id="timeout-test")
 
     with pytest.raises(TimeoutError):
         await client._process(request)
 
     assert "timeout-test" not in client._inflight
+    assert isinstance(transport.sent[-1], McpCancelledNotification)
+    assert transport.sent[-1].params.requestId == "timeout-test"
 
 
 @pytest.mark.asyncio
@@ -289,6 +483,111 @@ async def test_client_refresh_tools_reads_all_pages():
 
 
 @pytest.mark.asyncio
+async def test_client_lists_tools_without_capability_by_default():
+    class NoToolsCapabilityTransport(QueueClientTransport):
+        async def client_send_message(self, message) -> bool:
+            self.sent.append(message)
+            if isinstance(message, McpInitializeRequest):
+                result = McpInitializeResult(
+                    capabilities={},
+                    protocolVersion="2025-11-25",
+                    serverInfo={"name": "no-tools", "version": "0.0"},
+                )
+                await self.incoming.put(
+                    McpResponse(id=message.id, result=result.model_dump())
+                )
+            elif isinstance(message, McpListToolsRequest):
+                result = McpListToolsResult(tools=[])
+                await self.incoming.put(
+                    McpResponse(id=message.id, result=result.model_dump())
+                )
+            return True
+
+    transport = NoToolsCapabilityTransport()
+    client = McpClient()
+
+    try:
+        await client.initialize(transport)
+
+        assert await client.mcp_tools_list() == []
+        assert any(
+            isinstance(message, McpListToolsRequest) for message in transport.sent
+        )
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_client_can_skip_tools_list_without_capability():
+    class NoToolsCapabilityTransport(QueueClientTransport):
+        async def client_send_message(self, message) -> bool:
+            self.sent.append(message)
+            if isinstance(message, McpInitializeRequest):
+                result = McpInitializeResult(
+                    capabilities={},
+                    protocolVersion="2025-11-25",
+                    serverInfo={"name": "no-tools", "version": "0.0"},
+                )
+                await self.incoming.put(
+                    McpResponse(id=message.id, result=result.model_dump())
+                )
+            elif isinstance(message, McpListToolsRequest):
+                raise AssertionError("client should not list tools without capability")
+            return True
+
+    transport = NoToolsCapabilityTransport()
+    client = McpClient(flags={"enforce_mcp_tools_capability": True})
+
+    try:
+        await client.initialize(transport)
+
+        assert await client.mcp_tools_list() == []
+        assert not any(
+            isinstance(message, McpListToolsRequest) for message in transport.sent
+        )
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_server_cancels_inflight_request():
+    started = asyncio.Event()
+    cancelled = asyncio.Event()
+
+    async def slow_tool() -> str:
+        started.set()
+        try:
+            await asyncio.sleep(10)
+        except asyncio.CancelledError:
+            cancelled.set()
+            raise
+
+    server = McpServer()
+    await server.register_tool(slow_tool, alias="slow")
+    transport = McpMemoryTransport()
+    await server.create_host_task(transport)
+
+    try:
+        request = McpCallToolRequest(
+            id="slow-1", params=McpCallToolParams(name="slow", arguments={})
+        )
+        await transport.client_send_message(request)
+        await asyncio.wait_for(started.wait(), timeout=1)
+
+        await transport.client_send_message(
+            McpCancelledNotification(
+                params=McpCancelledNotificationParams(requestId="slow-1", reason="test")
+            )
+        )
+
+        await asyncio.wait_for(cancelled.wait(), timeout=1)
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(transport._server_to_client.get(), timeout=0.05)
+    finally:
+        await server.shutdown()
+
+
+@pytest.mark.asyncio
 async def test_client_responds_to_server_ping_request():
     transport = QueueClientTransport()
     client = McpClient()
@@ -303,6 +602,23 @@ async def test_client_responds_to_server_ping_request():
     assert response.id == "ping-1"
     assert response.result == {}
     await client.close()
+
+
+@pytest.mark.asyncio
+async def test_server_responds_to_client_ping_request():
+    server = McpServer()
+    transport = McpMemoryTransport()
+    await server.create_host_task(transport)
+
+    try:
+        await transport.client_send_message(McpPingRequest(id="server-ping-1"))
+        response = await asyncio.wait_for(transport._server_to_client.get(), timeout=1)
+
+        assert isinstance(response, McpResponse)
+        assert response.id == "server-ping-1"
+        assert response.result == {}
+    finally:
+        await server.shutdown()
 
 
 @pytest.mark.asyncio
@@ -468,6 +784,171 @@ async def test_http_client_reads_sse_until_matching_response(unused_tcp_port):
     finally:
         await transport.close()
         await runner.cleanup()
+
+
+@pytest.mark.asyncio
+async def test_http_client_recovers_expired_session(unused_tcp_port):
+    port = unused_tcp_port
+    records: list[tuple[str, str | None]] = []
+    runner = await _start_session_expiry_http_server(port, records)
+    transport = McpHttpClientTransport("127.0.0.1", port, path="/aiomcp")
+    context = McpClientContext()
+    await transport.client_initialize(context)
+
+    try:
+        initialize_request = McpInitializeRequest(
+            id="init-expiry",
+            params=McpInitializeParams(
+                capabilities={},
+                protocolVersion="2025-11-25",
+                clientInfo={"name": "expiry", "version": "0.0"},
+            ),
+        )
+        await transport.client_send_message(initialize_request)
+        _ = await asyncio.wait_for(transport._server_to_client.get(), timeout=1)
+
+        await transport.client_send_message(
+            McpNotification(method="notifications/initialized")
+        )
+        await transport.client_send_message(McpListToolsRequest(id="list-retry"))
+        response = await asyncio.wait_for(transport._server_to_client.get(), timeout=1)
+
+        assert isinstance(response, McpResponse)
+        assert response.id == "list-retry"
+        assert context.session_id == "fresh-session"
+        assert ("initialize", None) in records
+        assert ("tools/list", "expired-session") in records
+        assert ("tools/list", "fresh-session") in records
+        assert ("notifications/initialized", "fresh-session") in records
+    finally:
+        await transport.close()
+        await runner.cleanup()
+
+
+@pytest.mark.asyncio
+async def test_http_client_resumes_sse_with_last_event_id(unused_tcp_port):
+    port = unused_tcp_port
+    last_event_ids: list[str | None] = []
+    runner = await _start_resumable_sse_http_server(port, last_event_ids)
+    transport = McpHttpClientTransport("127.0.0.1", port, path="/aiomcp")
+    await transport.client_initialize(McpClientContext())
+
+    try:
+        await transport.client_send_message(McpListToolsRequest(id="resume-list"))
+
+        notification = await asyncio.wait_for(
+            transport._server_to_client.get(), timeout=1
+        )
+        response = await asyncio.wait_for(transport._server_to_client.get(), timeout=1)
+
+        assert last_event_ids == ["post-1"]
+        assert isinstance(notification, McpNotification)
+        assert notification.method == "notifications/progress"
+        assert isinstance(response, McpResponse)
+        assert response.id == "resume-list"
+        assert response.result == {"tools": []}
+    finally:
+        await transport.close()
+        await runner.cleanup()
+
+
+@pytest.mark.asyncio
+async def test_http_client_reads_get_sse_channel(unused_tcp_port):
+    port = unused_tcp_port
+    runner = await _start_get_sse_http_server(port)
+    transport = McpHttpClientTransport("127.0.0.1", port, path="/aiomcp")
+    await transport.client_initialize(McpClientContext())
+
+    try:
+        initialize_request = McpInitializeRequest(
+            id="init-get-sse",
+            params=McpInitializeParams(
+                capabilities={},
+                protocolVersion="2025-11-25",
+                clientInfo={"name": "get-sse", "version": "0.0"},
+            ),
+        )
+        await transport.client_send_message(initialize_request)
+        _ = await asyncio.wait_for(transport._server_to_client.get(), timeout=1)
+        notification = await asyncio.wait_for(
+            transport._server_to_client.get(), timeout=1
+        )
+
+        assert isinstance(notification, McpNotification)
+        assert notification.method == "notifications/tools/list_changed"
+    finally:
+        await transport.close()
+        await runner.cleanup()
+
+
+@pytest.mark.asyncio
+async def test_http_server_get_sse_channel_sends_one_stream(unused_tcp_port):
+    port = unused_tcp_port
+    transport = McpHttpServerTransport("127.0.0.1", port, path="/aiomcp")
+    await transport.server_initialize(McpServerContext())
+
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(
+                f"http://127.0.0.1:{port}/aiomcp",
+                headers={
+                    HEADER_ACCEPT: "text/event-stream",
+                    HEADER_MCP_PROTOCOL_VERSION: "2025-11-25",
+                },
+            ) as response:
+                assert response.status == 200
+                sent = await transport.server_send_message(
+                    McpNotification(method="notifications/tools/list_changed")
+                )
+                assert sent is True
+
+                lines = []
+                while len(lines) < 6:
+                    line = await asyncio.wait_for(
+                        response.content.readline(), timeout=1
+                    )
+                    if not line:
+                        break
+                    lines.append(line.decode("utf-8").strip())
+
+        assert any("notifications/tools/list_changed" in line for line in lines)
+    finally:
+        await transport.close()
+
+
+@pytest.mark.asyncio
+async def test_http_server_returns_404_for_terminated_session(unused_tcp_port):
+    port = unused_tcp_port
+    transport = McpHttpServerTransport("127.0.0.1", port, path="/aiomcp")
+    await transport.server_initialize(McpServerContext())
+
+    try:
+        async with aiohttp.ClientSession() as session:
+            delete_response = await session.delete(
+                f"http://127.0.0.1:{port}/aiomcp",
+                headers={
+                    HEADER_MCP_SESSION_ID: "gone-session",
+                    HEADER_MCP_PROTOCOL_VERSION: "2025-11-25",
+                },
+            )
+            await delete_response.read()
+            assert delete_response.status == 202
+
+            notification = McpNotification(method="notifications/initialized")
+            post_response = await session.post(
+                f"http://127.0.0.1:{port}/aiomcp",
+                data=notification.model_dump_json(exclude_none=True),
+                headers={
+                    HEADER_CONTENT_TYPE: "application/json",
+                    HEADER_ACCEPT: "application/json, text/event-stream",
+                    HEADER_MCP_SESSION_ID: "gone-session",
+                    HEADER_MCP_PROTOCOL_VERSION: "2025-11-25",
+                },
+            )
+            await post_response.read()
+            assert post_response.status == 404
+    finally:
+        await transport.close()
 
 
 @pytest.mark.asyncio

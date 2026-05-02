@@ -36,6 +36,18 @@ class McpInitializedNotification(McpNotification):
     )
 
 
+class McpCancelledNotificationParams(BaseModel):
+    requestId: Union[int, str]
+    reason: Optional[str] = None
+
+
+class McpCancelledNotification(McpNotification):
+    method: Literal[McpMethod.NOTIFICATIONS_CANCELLED] = (
+        McpMethod.NOTIFICATIONS_CANCELLED
+    )
+    params: McpCancelledNotificationParams
+
+
 class McpRequest(McpPackage):
     method: str
     params: Optional[Dict[str, Any]] = None
@@ -119,6 +131,8 @@ McpClientMessageUnion = Union[
     Annotated[
         Union[
             McpInitializedNotification,
+            McpCancelledNotification,
+            McpPingRequest,
             McpInitializeRequest,
             McpCallToolRequest,
             McpListToolsRequest,

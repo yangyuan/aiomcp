@@ -1,5 +1,6 @@
 import asyncio
 import inspect
+import json
 from typing import (
     Any,
     Awaitable,
@@ -37,6 +38,8 @@ from aiomcp.contracts.mcp_message import (
     McpListToolsResult,
     McpInitializeRequest,
     McpInitializedNotification,
+    McpCancelledNotification,
+    McpServerRequest,
 )
 from aiomcp.mcp_version import McpVersion
 
@@ -46,8 +49,10 @@ class McpCallableTool(McpTool):
 
 
 class McpServer:
-    def __init__(self, name: str = "aiomcp-server") -> None:
-        self._context = McpServerContext(McpServerFlags())
+    def __init__(
+        self, name: str = "aiomcp-server", flags: Dict[str, bool] | None = None
+    ) -> None:
+        self._context = McpServerContext(McpServerFlags.model_validate(flags or {}))
         self.name = name
         self._tools: Dict[str, McpCallableTool] = {}
         self._hosting: bool = False  # TODO: remove once enable multiple hosting.
@@ -114,6 +119,9 @@ class McpServer:
     async def list_tools(self) -> List[McpTool]:
         return list(self._tools.values())
 
+    def _server_capabilities(self) -> Dict[str, Any]:
+        return {"tools": {}}
+
     async def create_host_task(
         self,
         transport: McpServerTransport | str,
@@ -159,11 +167,12 @@ class McpServer:
                 pass
 
         for session in self._context.iter_sessions():
-            t = session.inflight
-            if t:
-                t.cancel()
+            tasks = list(session.request_tasks.values())
+            session.request_tasks.clear()
+            for task in tasks:
+                task.cancel()
                 try:
-                    await t
+                    await task
                 except asyncio.CancelledError:
                     pass
                 except Exception:
@@ -193,8 +202,41 @@ class McpServer:
                     pass
         return _kwargs
 
+    @staticmethod
+    def _tool_content(value: Any) -> List[Dict[str, Any]]:
+        if isinstance(value, str):
+            text = value
+        else:
+            try:
+                text = json.dumps(value, ensure_ascii=False)
+            except TypeError:
+                text = str(value)
+        return [{"type": "text", "text": text}]
+
+    def _to_tool_result(
+        self, tool: McpCallableTool, value: Any, *, is_error: bool = False
+    ) -> McpCallToolResult:
+        if isinstance(value, McpCallToolResult):
+            result = value
+            if result.isError is None:
+                result.isError = is_error
+            if result.content is None and result.structuredContent is not None:
+                result.content = self._tool_content(result.structuredContent)
+            return result
+
+        if isinstance(value, BaseModel):
+            value = value.model_dump()
+
+        return McpCallToolResult(
+            content=self._tool_content(value),
+            isError=is_error,
+            structuredContent=(
+                value if tool.outputSchema is not None and not is_error else None
+            ),
+        )
+
     async def process(
-        self, request: McpRequest, session_id: str | None = None
+        self, request: McpRequest | McpServerRequest, session_id: str | None = None
     ) -> McpResponseOrError:
         """Process a single MCP request and return a response."""
         try:
@@ -202,9 +244,9 @@ class McpServer:
 
             if self._context.flags.enforce_mcp_initialize_sequence:
                 session = self._get_session(session_id)
-                if (
-                    session.status == McpSessionStatus.UNINITIALIZED
-                    and method != McpMethod.INITIALIZE
+                if session.status == McpSessionStatus.UNINITIALIZED and method not in (
+                    McpMethod.INITIALIZE,
+                    McpMethod.PING,
                 ):
                     return McpError(
                         id=request.id,
@@ -213,7 +255,10 @@ class McpServer:
                             message=f"{McpServer.__name__} not initialized",
                         ),
                     )
-                if session.status == McpSessionStatus.INITIALIZING:
+                if (
+                    session.status == McpSessionStatus.INITIALIZING
+                    and method != McpMethod.PING
+                ):
                     return McpError(
                         id=request.id,
                         error=McpSystemError(
@@ -222,7 +267,9 @@ class McpServer:
                         ),
                     )
 
-            if method == McpMethod.TOOLS_LIST:
+            if method == McpMethod.PING:
+                return McpResponse(id=request.id, result={})
+            elif method == McpMethod.TOOLS_LIST:
                 if not isinstance(request, McpListToolsRequest):
                     return McpError(
                         id=request.id,
@@ -259,22 +306,16 @@ class McpServer:
                 try:
                     _kwargs = self._to_kwargs(tool.callable_async, arguments)
                     call_result = await tool.callable_async(**_kwargs)
-                    # only support pydantic models and built-in types (dict, list, str, int, etc)
-                    if isinstance(call_result, BaseModel):
-                        call_result = call_result.model_dump()
                 except Exception as ex:
-                    return McpError(
+                    error_result = self._to_tool_result(tool, str(ex), is_error=True)
+                    return McpResponse(
                         id=request.id,
-                        error=McpSystemError(
-                            code=McpErrorCodes.INTERNAL_ERROR,
-                            message=str(ex),
-                        ),
+                        result=error_result.model_dump(exclude_none=True),
                     )
+                result = self._to_tool_result(tool, call_result)
                 return McpResponse(
                     id=request.id,
-                    result=McpCallToolResult(
-                        structuredContent=call_result
-                    ).model_dump(),
+                    result=result.model_dump(exclude_none=True),
                 )
             elif method == McpMethod.INITIALIZE:
                 if not isinstance(request, McpInitializeRequest):
@@ -296,7 +337,7 @@ class McpServer:
                 session.status = McpSessionStatus.INITIALIZING
                 session.version.negotiate(protocol_version)
                 result = McpInitializeResult(
-                    capabilities={},
+                    capabilities=self._server_capabilities(),
                     protocolVersion=protocol_version,
                     serverInfo={"name": self.name, "version": "0.0.0"},
                 )
@@ -319,21 +360,33 @@ class McpServer:
             )
 
     async def _handle_message_loop(self, transport: McpServerTransport) -> None:
-        async def _handle_request(request: McpRequest, session_id: str | None) -> None:
+        async def _handle_request(
+            request: McpRequest | McpServerRequest, session_id: str | None
+        ) -> None:
             session = self._get_session(session_id)
             task = asyncio.current_task()
             if task:
-                session.inflight = task
+                session.request_tasks[request.id] = task
             try:
                 message = await self.process(request, session_id)
                 await transport.server_send_message(message, session_id)
             finally:
-                if task and session.inflight == task:
-                    session.inflight = None
+                if task and session.request_tasks.get(request.id) == task:
+                    session.request_tasks.pop(request.id, None)
+
+        def _handle_cancelled(
+            notification: McpCancelledNotification, session_id: str | None
+        ) -> None:
+            session = self._get_session(session_id)
+            task = session.request_tasks.get(notification.params.requestId)
+            if task is not None and not task.done():
+                task.cancel()
 
         async for message, session_id in transport.server_messages():
-            if isinstance(message, McpRequest):
+            if isinstance(message, (McpRequest, McpServerRequest)):
                 asyncio.create_task(_handle_request(message, session_id))
+            elif isinstance(message, McpCancelledNotification):
+                _handle_cancelled(message, session_id)
             elif isinstance(message, McpInitializedNotification):
                 session = self._get_session(session_id)
                 if self._context.flags.enforce_mcp_initialize_sequence:

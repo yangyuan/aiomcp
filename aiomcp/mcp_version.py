@@ -3,7 +3,7 @@ from typing import List, Optional
 
 class McpVersion:
     LATEST = "2025-11-25"
-    SUPPORTED = [LATEST]
+    SUPPORTED = [LATEST, "2025-06-18", "2025-03-26", "2024-11-05"]
 
     def __init__(self) -> None:
         self._negotiated_version: str = self.LATEST

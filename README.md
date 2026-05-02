@@ -115,3 +115,33 @@ authorization = McpAuthorizationServer()
 await server.host("http://127.0.0.1:8000/mcp", authorization=authorization)
 ```
 
+### Compatibility flags
+
+`aiomcp` defaults to broad compatibility, so it can connect to a wider range of MCP clients and servers. Compatibility flags let you opt into stricter protocol checks when you want closer MCP enforcement.
+
+```python
+from aiomcp import McpClient, McpServer
+
+mcp_client = McpClient(
+    flags={"enforce_mcp_tool_result_content": True}
+)
+
+mcp_server = McpServer(
+    flags={"enforce_mcp_initialize_sequence": True}
+)
+```
+
+Available client flags
+- `enforce_mcp_tools_capability`: require the server to advertise the `tools` capability before the client sends `tools/list`.
+- `enforce_mcp_tool_result_content`: reject tool results that omit `content`.
+- `enforce_mcp_version_negotiation`: reject unsupported negotiated protocol versions.
+- `enforce_mcp_session_header`: require HTTP session headers where applicable.
+- `enforce_mcp_protocol_header`: require HTTP protocol version headers where applicable.
+- `enforce_mcp_transport_version_consistency`: require HTTP header and initialize body protocol versions to match.
+
+Available server flags
+- `enforce_mcp_initialize_sequence`: reject requests sent before MCP initialization completes.
+- `enforce_mcp_version_negotiation`: negotiate only supported protocol versions.
+- `enforce_mcp_session_header`: require HTTP session headers where applicable.
+- `enforce_mcp_protocol_header`: require HTTP protocol version headers where applicable.
+

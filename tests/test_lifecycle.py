@@ -15,13 +15,13 @@ from aiomcp.contracts.mcp_message import (
     McpListToolsResult,
 )
 from aiomcp.jsonrpc_error_codes import JsonRpcErrorCodes
+from aiomcp.mcp_version import McpVersion
 
 
 @pytest.mark.asyncio
 async def test_server_enforce_initialize_sequence():
     async def _run():
-        server = McpServer()
-        server._context.flags.enforce_mcp_initialize_sequence = True
+        server = McpServer(flags={"enforce_mcp_initialize_sequence": True})
         transport = McpMemoryTransport()
 
         # Start server hosting
@@ -52,6 +52,7 @@ async def test_server_enforce_initialize_sequence():
         response = await transport._server_to_client.get()
         assert response.id == req_id
         assert response.result is not None
+        assert response.result["capabilities"] == {"tools": {}}
 
         # Server status should be INITIALIZING
         assert server._get_session(None).status == McpSessionStatus.INITIALIZING
@@ -90,8 +91,7 @@ async def test_server_enforce_initialize_sequence():
 @pytest.mark.asyncio
 async def test_server_version_negotiation():
     async def _run():
-        server = McpServer()
-        server._context.flags.enforce_mcp_version_negotiation = True
+        server = McpServer(flags={"enforce_mcp_version_negotiation": True})
         transport = McpMemoryTransport()
         await server.create_host_task(transport)
 
@@ -112,8 +112,7 @@ async def test_server_version_negotiation():
         # Reset server for next test
         await server.shutdown()
 
-        server = McpServer()
-        server._context.flags.enforce_mcp_version_negotiation = True
+        server = McpServer(flags={"enforce_mcp_version_negotiation": True})
         transport = McpMemoryTransport()
         host_task = await server.create_host_task(transport)
 
@@ -135,6 +134,32 @@ async def test_server_version_negotiation():
         await server.shutdown()
 
     await asyncio.wait_for(_run(), timeout=5)
+
+
+def test_server_accepts_flags_dict():
+    server = McpServer(flags={"enforce_mcp_initialize_sequence": True})
+
+    assert server._context.flags.enforce_mcp_initialize_sequence is True
+
+
+def test_server_rejects_unknown_flag():
+    with pytest.raises(ValueError):
+        McpServer(flags={"unknown_flag": True})
+
+
+def test_server_rejects_non_dict_flags():
+    with pytest.raises(ValueError):
+        McpServer(flags=object())  # type: ignore[arg-type]
+
+
+def test_all_known_versions_are_supported():
+    assert McpVersion().supported_versions == [
+        "2025-11-25",
+        "2025-06-18",
+        "2025-03-26",
+        "2024-11-05",
+    ]
+    assert McpVersion().default_version == "2025-11-25"
 
 
 @pytest.mark.asyncio
