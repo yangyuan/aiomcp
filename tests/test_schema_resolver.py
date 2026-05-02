@@ -1,15 +1,32 @@
+from enum import Enum, IntEnum, StrEnum
 import typing
 import pytest
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Literal, Optional, Union
 
 from pydantic import BaseModel
 
+from aiomcp.contracts.mcp_schema import JsonSchema
 from aiomcp.mcp_schema_resolver import McpSchemaResolver
 
 
 class Point(BaseModel):
     x: int
     y: int
+
+
+class Color(Enum):
+    RED = "red"
+    BLUE = "blue"
+
+
+class Priority(IntEnum):
+    LOW = 1
+    HIGH = 2
+
+
+class Tone(StrEnum):
+    WARM = "warm"
+    COOL = "cool"
 
 
 def test_resolve_primitives_and_required():
@@ -64,6 +81,41 @@ def test_list_and_dict_mapping():
         "additionalProperties": {"type": "array", "items": {"type": "integer"}},
     }
     assert output_schema is None
+
+
+def test_enum_and_literal_mapping():
+    def f(
+        color: Color,
+        tone: Tone,
+        priority: Priority,
+        mode: Literal["fast", "slow"],
+        enabled: Literal[True],
+    ) -> Tone:
+        return tone
+
+    _, input_schema, output_schema = McpSchemaResolver.resolve(f)
+
+    props = input_schema["properties"]
+    assert props["color"] == {"enum": ["red", "blue"], "type": "string"}
+    assert props["tone"] == {"enum": ["warm", "cool"], "type": "string"}
+    assert props["priority"] == {"enum": [1, 2], "type": "integer"}
+    assert props["mode"] == {"enum": ["fast", "slow"], "type": "string"}
+    assert props["enabled"] == {"enum": [True], "type": "boolean"}
+    assert output_schema == {"enum": ["warm", "cool"], "type": "string"}
+
+
+def test_json_schema_preserves_enum_refs_and_null_type():
+    class Paint(BaseModel):
+        color: Color
+        label: Optional[str] = None
+
+    schema = JsonSchema.model_validate(Paint.model_json_schema())
+    dumped = schema.model_dump(exclude_none=True)
+
+    assert "$defs" in dumped
+    assert dumped["$defs"]["Color"]["enum"] == ["red", "blue"]
+    assert dumped["properties"]["color"]["$ref"] == "#/$defs/Color"
+    assert dumped["properties"]["label"]["anyOf"][1]["type"] == "null"
 
 
 def test_return_schema_handling():

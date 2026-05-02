@@ -2,7 +2,7 @@
 A Simple Python MCP Solution
 
 ## Mission of aiomcp
-A smooth start experience.
+Start with a smooth experience, end with a compliant solution.
 
 
 ## Tutorial

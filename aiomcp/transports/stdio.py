@@ -1,6 +1,6 @@
 import asyncio
 import sys
-from typing import AsyncIterator, Optional, Sequence, Tuple, Union
+from typing import AsyncIterator, Mapping, Optional, Sequence, Tuple, Union
 
 from pydantic import TypeAdapter, ValidationError
 
@@ -20,10 +20,12 @@ class McpStdioClientTransport(McpClientTransport):
         command: Union[str, Sequence[str]],
         *,
         cwd: Optional[str] = None,
+        env: Optional[Mapping[str, str]] = None,
         shell: bool = False,
     ) -> None:
         self._command = command
         self._cwd = cwd
+        self._env = dict(env) if env is not None else None
         self._shell = shell
         self._process: Optional[asyncio.subprocess.Process] = None
         self._reader: Optional[asyncio.StreamReader] = None
@@ -48,6 +50,7 @@ class McpStdioClientTransport(McpClientTransport):
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 cwd=self._cwd,
+                env=self._env,
             )
         else:
             if isinstance(self._command, str):
@@ -60,6 +63,7 @@ class McpStdioClientTransport(McpClientTransport):
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 cwd=self._cwd,
+                env=self._env,
             )
         if process.stdout is None or process.stdin is None or process.stderr is None:
             raise RuntimeError(

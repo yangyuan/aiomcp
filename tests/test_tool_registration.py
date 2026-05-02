@@ -1,3 +1,4 @@
+from enum import Enum
 import json
 import pytest
 
@@ -30,6 +31,15 @@ async def add_async(a: int, b: int) -> int:
 
 def add_sync(a: int, b: int) -> int:
     return a + b
+
+
+class Color(Enum):
+    RED = "red"
+    BLUE = "blue"
+
+
+async def echo_color(color: Color) -> Color:
+    return color
 
 
 class AddClass:
@@ -106,3 +116,29 @@ async def test_tool_registration():
         # Invalid request should raise from server-side validation
         with pytest.raises(Exception):
             await client.invoke(t_name, {"a": "nope", "b": 2})
+
+
+@pytest.mark.asyncio
+async def test_enum_tool_registration_and_result_serialization():
+    server = McpServer()
+    await server.register_tool(echo_color)
+
+    tools = await server.list_tools()
+    tool = next(tool for tool in tools if tool.name == "echo_color")
+    input_schema = tool.inputSchema.model_dump(exclude_none=True)
+    output_schema = tool.outputSchema.model_dump(exclude_none=True)
+
+    assert input_schema["properties"]["color"] == {
+        "enum": ["red", "blue"],
+        "type": "string",
+    }
+    assert output_schema == {"enum": ["red", "blue"], "type": "string"}
+
+    client = McpClient()
+    await client.initialize(server)
+
+    try:
+        result = await client.invoke("echo_color", {"color": "red"})
+        assert result == "red"
+    finally:
+        await client.close()

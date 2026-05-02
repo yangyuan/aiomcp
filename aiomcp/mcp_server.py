@@ -1,6 +1,7 @@
 import asyncio
 import inspect
 import json
+from enum import Enum
 from typing import (
     Any,
     Awaitable,
@@ -203,6 +204,24 @@ class McpServer:
         return _kwargs
 
     @staticmethod
+    def _to_jsonable(value: Any) -> Any:
+        if isinstance(value, Enum):
+            return McpServer._to_jsonable(value.value)
+        if isinstance(value, BaseModel):
+            return value.model_dump(mode="json")
+        if isinstance(value, dict):
+            return {
+                McpServer._to_jsonable(key): McpServer._to_jsonable(item)
+                for key, item in value.items()
+            }
+        if isinstance(value, (list, tuple, set)):
+            return [McpServer._to_jsonable(item) for item in value]
+        try:
+            return TypeAdapter(Any).dump_python(value, mode="json")
+        except Exception:
+            return value
+
+    @staticmethod
     def _tool_content(value: Any) -> List[Dict[str, Any]]:
         if isinstance(value, str):
             text = value
@@ -224,8 +243,7 @@ class McpServer:
                 result.content = self._tool_content(result.structuredContent)
             return result
 
-        if isinstance(value, BaseModel):
-            value = value.model_dump()
+        value = self._to_jsonable(value)
 
         return McpCallToolResult(
             content=self._tool_content(value),

@@ -1,5 +1,6 @@
 import asyncio
 import json
+import os
 import sys
 from typing import AsyncIterator
 
@@ -703,6 +704,25 @@ async def test_stdio_client_close_sends_stdin_eof_before_terminating(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_stdio_client_passes_custom_environment():
+    code = (
+        "import json, os; "
+        "print(json.dumps({'jsonrpc': '2.0', 'id': os.environ['AIOMCP_TEST_ENV'], 'result': {}}), flush=True)"
+    )
+    env = dict(os.environ)
+    env["AIOMCP_TEST_ENV"] = "custom-env"
+    transport = McpStdioClientTransport([sys.executable, "-c", code], env=env)
+    await transport.client_initialize(McpClientContext())
+
+    try:
+        message = await asyncio.wait_for(anext(transport.client_messages()), timeout=2)
+        assert isinstance(message, McpResponse)
+        assert message.id == "custom-env"
+    finally:
+        await transport.close()
+
+
+@pytest.mark.asyncio
 async def test_direct_transport():
     mcp_server = McpServer()
     mcp_client = McpClient()
@@ -729,6 +749,31 @@ async def test_http_transport(unused_tcp_port):
     mcp_client = McpClient()
 
     await _client_driven_validation(client_transport, mcp_client, mcp_server)
+
+
+@pytest.mark.asyncio
+async def test_http_transport_uses_custom_client_headers(unused_tcp_port):
+    port = unused_tcp_port
+    transport = McpHttpTransport(
+        "127.0.0.1",
+        port,
+        path="/aiomcp",
+        headers={"x-aiomcp-test": "custom-header"},
+    )
+    await transport.client_initialize(McpClientContext())
+
+    try:
+        headers = await transport._client._build_headers(
+            McpListToolsRequest(id="headers"),
+            accept="application/json",
+            include_content_type=True,
+        )
+
+        assert headers["x-aiomcp-test"] == "custom-header"
+        assert headers[HEADER_ACCEPT] == "application/json"
+        assert headers[HEADER_CONTENT_TYPE] == "application/json"
+    finally:
+        await transport.close()
 
 
 @pytest.mark.asyncio

@@ -1,11 +1,50 @@
 import inspect
 import types
-from typing import Any, Dict, List, Optional, Union, get_args, get_origin
+from enum import Enum
+from typing import Any, Dict, List, Literal, Optional, Union, get_args, get_origin
 
 from pydantic import BaseModel
 
 
 class McpSchemaResolver:
+
+    @staticmethod
+    def _json_schema_type_for_values(values: list[Any]) -> Optional[str]:
+        if all(value is None for value in values):
+            return "null"
+        if all(isinstance(value, bool) for value in values):
+            return "boolean"
+        if all(
+            isinstance(value, int) and not isinstance(value, bool) for value in values
+        ):
+            return "integer"
+        if all(
+            isinstance(value, (int, float)) and not isinstance(value, bool)
+            for value in values
+        ):
+            return "number"
+        if all(isinstance(value, str) for value in values):
+            return "string"
+        return None
+
+    @staticmethod
+    def _json_enum_value(value: Any) -> Any:
+        if isinstance(value, Enum):
+            value = value.value
+        if value is None or isinstance(value, (str, int, float, bool)):
+            return value
+        raise TypeError(
+            f"{McpSchemaResolver.__name__} enum values must be JSON primitives."
+        )
+
+    @staticmethod
+    def _values_to_enum_schema(values: tuple[Any, ...]) -> Dict[str, Any]:
+        enum_values = [McpSchemaResolver._json_enum_value(value) for value in values]
+        schema: Dict[str, Any] = {"enum": enum_values}
+        json_type = McpSchemaResolver._json_schema_type_for_values(enum_values)
+        if json_type is not None:
+            schema["type"] = json_type
+        return schema
 
     @staticmethod
     def _is_optional(annotation) -> bool:
@@ -27,6 +66,11 @@ class McpSchemaResolver:
         if inspect.isclass(annotation) and issubclass(annotation, BaseModel):
             return annotation.model_json_schema()
 
+        if inspect.isclass(annotation) and issubclass(annotation, Enum):
+            return McpSchemaResolver._values_to_enum_schema(
+                tuple(member.value for member in annotation)
+            )
+
         if annotation is int:
             return {"type": "integer"}
         if annotation is str:
@@ -38,6 +82,9 @@ class McpSchemaResolver:
 
         origin = get_origin(annotation)
         args = get_args(annotation)
+
+        if origin is Literal:
+            return McpSchemaResolver._values_to_enum_schema(args)
 
         if origin in (list, List):
             if not args:

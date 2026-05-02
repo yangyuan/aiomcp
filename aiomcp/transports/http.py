@@ -1,7 +1,7 @@
 import asyncio
 import codecs
 import uuid
-from typing import AsyncIterator, Dict, Optional
+from typing import AsyncIterator, Dict, Mapping, Optional
 
 import aiohttp
 from aiohttp import web
@@ -69,6 +69,7 @@ class McpHttpClientTransport(McpClientTransport):
         path: str = "/",
         scheme: str = "http",
         authorization: Optional[McpAuthorizationClient] = None,
+        headers: Optional[Mapping[str, str]] = None,
     ) -> None:
         assert path.startswith("/"), "HTTP path must start with '/'"
         self._path = path
@@ -79,6 +80,7 @@ class McpHttpClientTransport(McpClientTransport):
         self._session: Optional[aiohttp.ClientSession] = None
         self._context: Optional[McpClientContext] = None
         self._authorization: Optional[McpAuthorizationClient] = authorization
+        self._headers: Dict[str, str] = dict(headers or {})
         self._initialize_request: Optional[McpInitializeRequest] = None
         self._initialized_notification: Optional[McpNotification] = None
         self._server_message_stream_task: Optional[asyncio.Task[None]] = None
@@ -234,10 +236,13 @@ class McpHttpClientTransport(McpClientTransport):
             )
         context = self._context
         protocol_version = context.version.version or DEFAULT_PROTOCOL_VERSION
-        headers = {
-            HEADER_ACCEPT: accept,
-            HEADER_MCP_PROTOCOL_VERSION: protocol_version,
-        }
+        headers = dict(self._headers)
+        headers.update(
+            {
+                HEADER_ACCEPT: accept,
+                HEADER_MCP_PROTOCOL_VERSION: protocol_version,
+            }
+        )
         if include_content_type:
             headers[HEADER_CONTENT_TYPE] = CONTENT_TYPE_JSON
         if self._authorization is not None:
@@ -908,9 +913,15 @@ class McpHttpTransport(McpTransport):
         scheme: str = "http",
         authorization_client: Optional[McpAuthorizationClient] = None,
         authorization_server: Optional[McpAuthorizationServer] = None,
+        headers: Optional[Mapping[str, str]] = None,
     ) -> None:
         self._client: McpHttpClientTransport = McpHttpClientTransport(
-            hostname, port, path=path, scheme=scheme, authorization=authorization_client
+            hostname,
+            port,
+            path=path,
+            scheme=scheme,
+            authorization=authorization_client,
+            headers=headers,
         )
         self._server: McpHttpServerTransport = McpHttpServerTransport(
             hostname, port, path=path, authorization=authorization_server
