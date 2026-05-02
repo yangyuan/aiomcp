@@ -9,7 +9,12 @@ class McpMethod(StrEnum):
     TOOLS_CALL = "tools/call"
     TOOLS_LIST = "tools/list"
     INITIALIZE = "initialize"
+    PING = "ping"
     NOTIFICATIONS_INITIALIZED = "notifications/initialized"
+    NOTIFICATIONS_TOOLS_LIST_CHANGED = "notifications/tools/list_changed"
+    NOTIFICATIONS_PROGRESS = "notifications/progress"
+    NOTIFICATIONS_MESSAGE = "notifications/message"
+    NOTIFICATIONS_CANCELLED = "notifications/cancelled"
 
 
 class McpMessage(BaseModel):
@@ -21,7 +26,7 @@ class McpPackage(McpMessage):
 
 
 class McpNotification(McpMessage):
-    method: McpMethod
+    method: str
     params: Optional[Dict[str, Any]] = None
 
 
@@ -32,7 +37,18 @@ class McpInitializedNotification(McpNotification):
 
 
 class McpRequest(McpPackage):
-    method: McpMethod
+    method: str
+    params: Optional[Dict[str, Any]] = None
+
+
+class McpServerRequest(McpPackage):
+    method: str
+    params: Optional[Dict[str, Any]] = None
+
+
+class McpPingRequest(McpServerRequest):
+    method: Literal[McpMethod.PING] = McpMethod.PING
+    params: Optional[Dict[str, Any]] = None
 
 
 class McpInitializeParams(BaseModel):
@@ -98,14 +114,19 @@ class McpListToolsResult(BaseModel):
 
 McpResponseOrError = Union[McpResponse, McpError]
 
-McpClientMessageAnnotated = Annotated[
-    Union[
-        McpInitializedNotification,
-        McpInitializeRequest,
-        McpCallToolRequest,
-        McpListToolsRequest,
+McpClientMessageUnion = Union[
+    McpResponseOrError,
+    Annotated[
+        Union[
+            McpInitializedNotification,
+            McpInitializeRequest,
+            McpCallToolRequest,
+            McpListToolsRequest,
+        ],
+        Field(discriminator="method"),
     ],
-    Field(discriminator="method"),
 ]
 
-McpServerMessageUnion = Union[McpResponseOrError, McpNotification]
+McpServerMessageUnion = Union[
+    McpResponseOrError, McpPingRequest, McpServerRequest, McpNotification
+]

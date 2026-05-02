@@ -10,6 +10,7 @@ from aiomcp.mcp_authorization import McpAuthorizationClient
 from aiomcp.transports.base import McpClientTransport
 from aiomcp.transports.direct import McpDirectClientTransport
 from aiomcp.contracts.mcp_tool import McpTool
+from aiomcp.jsonrpc_error_codes import JsonRpcErrorCodes
 from aiomcp.contracts.mcp_message import (
     McpCallToolRequest,
     McpInitializeRequest,
@@ -25,6 +26,9 @@ from aiomcp.contracts.mcp_message import (
     McpNotification,
     McpMethod,
     McpCallToolResult,
+    McpListToolsParams,
+    McpServerRequest,
+    McpSystemError,
 )
 
 
@@ -126,7 +130,10 @@ class McpClient:
                     future = self._inflight.pop(msg.id, None)
                     if future is not None and not future.done():
                         future.set_result(msg)
-                # TODO: save responses for other ids, handle other notifications, etc.
+                elif isinstance(msg, McpServerRequest):
+                    await self._handle_server_request(msg)
+                elif isinstance(msg, McpNotification):
+                    self._handle_server_notification(msg)
         except asyncio.CancelledError:
             self._fail_inflight(
                 RuntimeError(f"{McpClient.__name__} message loop was cancelled")
@@ -140,6 +147,25 @@ class McpClient:
             self._fail_inflight(
                 RuntimeError(f"{McpClient.__name__} message stream closed unexpectedly")
             )
+
+    async def _handle_server_request(self, request: McpServerRequest) -> None:
+        transport = self._transport
+        if transport is None:
+            return
+        if request.method == McpMethod.PING:
+            response = McpResponse(id=request.id, result={})
+        else:
+            response = McpError(
+                id=request.id,
+                error=McpSystemError(
+                    code=JsonRpcErrorCodes.METHOD_NOT_FOUND,
+                    message=f"{McpClient.__name__} does not support server request method {request.method}",
+                ),
+            )
+        await transport.client_send_message(response)
+
+    def _handle_server_notification(self, notification: McpNotification) -> None:
+        return
 
     def _fail_inflight(self, exc: BaseException) -> None:
         pending = list(self._inflight.values())
@@ -161,7 +187,9 @@ class McpClient:
         return future
 
     async def _process(
-        self, request: McpRequest, timeout: float | None = None
+        self,
+        request: McpRequest,
+        timeout: float | None = None,
     ) -> McpResponseOrError:
         transport = self._transport
         if transport is None:
@@ -216,20 +244,34 @@ class McpClient:
         return structured
 
     async def _refresh_tools(self) -> List[McpTool]:
-        request_id = self._generate_request_id()
-        request = McpListToolsRequest(id=request_id, params=None)
-        response = await self._process(request)
-        if isinstance(response, McpError):
-            raise RuntimeError(
-                f"{McpClient.__name__} failed to list tools, {response.error.model_dump_json()}"
+        tools: List[McpTool] = []
+        cursor: str | None = None
+        while True:
+            request_id = self._generate_request_id()
+            request = McpListToolsRequest(
+                id=request_id,
+                params=(
+                    McpListToolsParams(cursor=cursor) if cursor is not None else None
+                ),
             )
-        try:
-            structured = McpListToolsResult.model_validate(response.result)
-        except Exception as e:
-            raise RuntimeError(f"{McpClient.__name__} failed to parse tools list: {e}")
+            response = await self._process(request)
+            if isinstance(response, McpError):
+                raise RuntimeError(
+                    f"{McpClient.__name__} failed to list tools, {response.error.model_dump_json()}"
+                )
+            try:
+                structured = McpListToolsResult.model_validate(response.result)
+            except Exception as e:
+                raise RuntimeError(
+                    f"{McpClient.__name__} failed to parse tools list: {e}"
+                )
+            tools.extend(structured.tools)
+            cursor = structured.nextCursor
+            if cursor is None:
+                break
         # Populate internal lookup for subsequent calls
-        self._tools = {t.name: t for t in structured.tools}
-        return structured.tools
+        self._tools = {t.name: t for t in tools}
+        return tools
 
     async def mcp_tools_list(self) -> List[McpTool]:
         self._check_initialized()
@@ -276,6 +318,12 @@ class McpClient:
     async def invoke(
         self, tool_name: str, arguments: Dict[str, Any], timeout: float | None = None
     ) -> Any:
+        structured = await self.invoke_result(tool_name, arguments, timeout=timeout)
+        return self._coerce_tool_result(structured)
+
+    async def invoke_result(
+        self, tool_name: str, arguments: Dict[str, Any], timeout: float | None = None
+    ) -> McpCallToolResult:
         self._check_initialized()
         tool = self._tools.get(tool_name)
         if tool is None:
@@ -296,9 +344,8 @@ class McpClient:
         try:
             structured = McpCallToolResult.model_validate(response.result)
         except Exception as e:
-            raise RuntimeError(f"{McpClient.__name__} failed to parse tools list: {e}")
-
-        return self._coerce_tool_result(structured)
+            raise RuntimeError(f"{McpClient.__name__} failed to parse tool result: {e}")
+        return structured
 
     def _coerce_tool_result(self, structured: McpCallToolResult) -> Any:
         if structured.structuredContent is not None:

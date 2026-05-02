@@ -5,7 +5,7 @@ from typing import AsyncIterator, Optional, Sequence, Tuple, Union
 from pydantic import TypeAdapter, ValidationError
 
 from aiomcp.contracts.mcp_message import (
-    McpClientMessageAnnotated,
+    McpClientMessageUnion,
     McpMessage,
     McpServerMessageUnion,
 )
@@ -219,7 +219,7 @@ class McpStdioServerTransport(McpServerTransport):
             await self._raw_lines.put(None)
 
     async def _decode_loop(self) -> None:
-        adapter = TypeAdapter(McpClientMessageAnnotated)
+        adapter = TypeAdapter(McpClientMessageUnion)
         while True:
             line = await self._raw_lines.get()
             if line is None:

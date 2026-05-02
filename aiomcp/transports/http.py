@@ -1,4 +1,5 @@
 import asyncio
+import codecs
 import uuid
 from typing import AsyncIterator, Dict, Optional
 
@@ -7,13 +8,15 @@ from aiohttp import web
 from pydantic import TypeAdapter
 
 from aiomcp.contracts.mcp_message import (
-    McpClientMessageAnnotated,
+    McpClientMessageUnion,
+    McpError,
     McpMessage,
     McpNotification,
     McpRequest,
     McpInitializeRequest,
     McpResponse,
     McpResponseOrError,
+    McpServerMessageUnion,
     McpMethod,
     McpInitializeResult,
 )
@@ -21,7 +24,11 @@ from aiomcp.mcp_context import McpServerContext, McpClientContext
 from aiomcp.mcp_serialization import McpSerialization
 from aiomcp.mcp_version import McpVersion
 from aiomcp.mcp_authorization import McpAuthorizationClient, McpAuthorizationServer
-from aiomcp.transports.base import McpClientTransport, McpServerTransport, McpTransport
+from aiomcp.transports.base import (
+    McpClientTransport,
+    McpServerTransport,
+    McpTransport,
+)
 
 HEADER_CONTENT_TYPE = "content-type"
 HEADER_ACCEPT = "accept"
@@ -65,30 +72,87 @@ class McpHttpClientTransport(McpClientTransport):
             message = await self._server_to_client.get()
             yield message
 
-    async def _extract_payload_from_response_body(
+    async def _iter_sse_payloads(
         self, response: aiohttp.ClientResponse
-    ) -> bytes:
-        content_type = response.headers.get(HEADER_CONTENT_TYPE, "").lower()
-        if CONTENT_TYPE_STREAM not in content_type:
-            return await response.read()
-        body_text = await response.text()
+    ) -> AsyncIterator[bytes]:
+        decoder = codecs.getincrementaldecoder("utf-8")()
+        buffer = ""
         data_lines: list[str] = []
-        for raw_line in body_text.splitlines():
-            line = raw_line.rstrip("\r\n")
+
+        def _process_line(line: str) -> bytes | None:
+            nonlocal data_lines
             if line == "":
-                if data_lines:
-                    break
-                continue
+                if not data_lines:
+                    return None
+                payload = "\n".join(data_lines).encode("utf-8")
+                data_lines = []
+                return payload
             if line.startswith(":"):
-                continue
+                return None
             field, sep, value = line.partition(":")
             if not sep:
-                continue
+                return None
             if value.startswith(" "):
                 value = value[1:]
             if field == "data":
                 data_lines.append(value)
-        return "\n".join(data_lines).encode("utf-8")
+            return None
+
+        async for chunk in response.content.iter_chunked(4096):
+            buffer += decoder.decode(chunk)
+            while True:
+                newline_index = buffer.find("\n")
+                if newline_index < 0:
+                    break
+                line = buffer[:newline_index]
+                buffer = buffer[newline_index + 1 :]
+                if line.endswith("\r"):
+                    line = line[:-1]
+                payload = _process_line(line)
+                if payload is not None:
+                    yield payload
+
+        buffer += decoder.decode(b"", final=True)
+        if buffer:
+            if buffer.endswith("\r"):
+                buffer = buffer[:-1]
+            payload = _process_line(buffer)
+            if payload is not None:
+                yield payload
+        if data_lines:
+            yield "\n".join(data_lines).encode("utf-8")
+
+    async def _read_messages_from_response_body(
+        self, response: aiohttp.ClientResponse, expected_response_id: int | str | None
+    ) -> list[McpMessage]:
+        content_type = response.headers.get(HEADER_CONTENT_TYPE, "").lower()
+        if CONTENT_TYPE_STREAM not in content_type:
+            body = await response.read()
+            if not body:
+                return []
+            try:
+                return [TypeAdapter(McpServerMessageUnion).validate_json(body)]
+            except Exception:
+                raise RuntimeError(
+                    f"{McpHttpClientTransport.__name__} failed to parse response: {body.decode()}"
+                )
+
+        messages: list[McpMessage] = []
+        async for payload in self._iter_sse_payloads(response):
+            try:
+                message = TypeAdapter(McpServerMessageUnion).validate_json(payload)
+            except Exception:
+                raise RuntimeError(
+                    f"{McpHttpClientTransport.__name__} failed to parse SSE response event: {payload.decode()}"
+                )
+            messages.append(message)
+            if (
+                expected_response_id is not None
+                and isinstance(message, (McpResponse, McpError))
+                and message.id == expected_response_id
+            ):
+                break
+        return messages
 
     async def client_send_message(self, message: McpMessage) -> bool:
         assert self._session is not None
@@ -148,16 +212,26 @@ class McpHttpClientTransport(McpClientTransport):
                 if server_session_id:
                     context.session_id = server_session_id.strip()
 
-            response_body = await self._extract_payload_from_response_body(response)
+            expected_response_id = (
+                message.id if isinstance(message, McpRequest) else None
+            )
+            response_messages = await self._read_messages_from_response_body(
+                response, expected_response_id
+            )
 
         if isinstance(message, McpRequest):
-            try:
-                structured_response: McpMessage = TypeAdapter(
-                    McpResponseOrError
-                ).validate_json(response_body)
-            except Exception:
+            structured_response: McpMessage | None = None
+            for response_message in response_messages:
+                await self._server_to_client.put(response_message)
+                if (
+                    isinstance(response_message, (McpResponse, McpError))
+                    and response_message.id == message.id
+                ):
+                    structured_response = response_message
+
+            if structured_response is None:
                 raise RuntimeError(
-                    f"{McpHttpClientTransport.__name__} failed to parse response: {response_body.decode()}"
+                    f"{McpHttpClientTransport.__name__} response did not include matching ID {message.id!r}"
                 )
 
             body_protocol_version: Optional[str] = None
@@ -175,7 +249,9 @@ class McpHttpClientTransport(McpClientTransport):
                 enforce_consistency=context.flags.enforce_mcp_transport_version_consistency,
             )
 
-            await self._server_to_client.put(structured_response)
+        else:
+            for response_message in response_messages:
+                await self._server_to_client.put(response_message)
         return True
 
     async def close(self):
@@ -257,7 +333,7 @@ class McpHttpServerTransport(McpServerTransport):
 
         request_body = await request.read()
         try:
-            message = TypeAdapter(McpClientMessageAnnotated).validate_json(request_body)
+            message = TypeAdapter(McpClientMessageUnion).validate_json(request_body)
         except Exception:
             raise RuntimeError(
                 f"{McpHttpServerTransport.__name__} failed to parse request: {request_body.decode()}"

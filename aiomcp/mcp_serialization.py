@@ -1,8 +1,8 @@
 from pydantic import TypeAdapter
 from aiomcp.contracts.mcp_message import (
     McpMessage,
-    McpClientMessageAnnotated,
-    McpResponseOrError,
+    McpClientMessageUnion,
+    McpServerMessageUnion,
 )
 
 """
@@ -15,7 +15,7 @@ class McpSerialization:
     @staticmethod
     def process_client_message(message: McpMessage) -> McpMessage:
         json_str = message.model_dump_json()
-        adapter = TypeAdapter(McpClientMessageAnnotated)
+        adapter = TypeAdapter(McpClientMessageUnion)
         return adapter.validate_json(json_str)
 
     @staticmethod
@@ -23,5 +23,5 @@ class McpSerialization:
         # Server may pass a response with "error": null, which is not strictly conforming to the spec, but can be tolerated.
         # TODO: enhance server message serialization by peeking into message fields like "error", "result".
         json_str = message.model_dump_json()
-        adapter = TypeAdapter(McpResponseOrError)
+        adapter = TypeAdapter(McpServerMessageUnion)
         return adapter.validate_json(json_str)
