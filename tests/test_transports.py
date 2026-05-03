@@ -1,4 +1,5 @@
 import asyncio
+import io
 import json
 import os
 import sys
@@ -12,6 +13,7 @@ from pydantic import BaseModel
 from aiomcp.mcp_server import McpServer
 from aiomcp.mcp_client import McpClient
 from aiomcp.mcp_context import McpClientContext, McpServerContext
+from aiomcp.mcp_flag import McpClientFlags, McpServerFlags
 from aiomcp.contracts.mcp_message import (
     McpCallToolParams,
     McpCallToolRequest,
@@ -39,7 +41,7 @@ from aiomcp.transports.http import (
     McpHttpServerTransport,
     McpHttpTransport,
 )
-from aiomcp.transports.stdio import McpStdioClientTransport
+from aiomcp.transports.stdio import McpStdioClientTransport, McpStdioServerTransport
 
 HEADER_CONTENT_TYPE = "content-type"
 HEADER_ACCEPT = "accept"
@@ -669,6 +671,189 @@ async def test_stdio_client_drains_child_stderr():
         message = await asyncio.wait_for(anext(transport.client_messages()), timeout=2)
         assert isinstance(message, McpResponse)
         assert message.id == "ready"
+    finally:
+        await transport.close()
+
+
+@pytest.mark.asyncio
+async def test_stdio_client_accepts_large_stdout_message():
+    code = (
+        "import json; "
+        "print(json.dumps({"
+        "'jsonrpc': '2.0', "
+        "'id': 'large', "
+        "'result': {'text': 'x' * 200000}"
+        "}), flush=True)"
+    )
+
+    transport = McpStdioClientTransport([sys.executable, "-c", code])
+    await transport.client_initialize(McpClientContext())
+    try:
+        message = await asyncio.wait_for(anext(transport.client_messages()), timeout=2)
+        assert isinstance(message, McpResponse)
+        assert message.id == "large"
+        assert message.result["text"] == "x" * 200000
+    finally:
+        await transport.close()
+
+
+@pytest.mark.asyncio
+async def test_stdio_client_max_frame_size_is_configurable():
+    code = (
+        "import json; "
+        "print(json.dumps({"
+        "'jsonrpc': '2.0', "
+        "'id': 'large', "
+        "'result': {'text': 'x' * 5000}"
+        "}), flush=True)"
+    )
+
+    transport = McpStdioClientTransport(
+        [sys.executable, "-c", code], max_frame_size=1024
+    )
+    await transport.client_initialize(McpClientContext())
+    try:
+        with pytest.raises(RuntimeError, match="max_frame_size=1024"):
+            await asyncio.wait_for(anext(transport.client_messages()), timeout=2)
+    finally:
+        await transport.close()
+
+    transport = McpStdioClientTransport(
+        [sys.executable, "-c", code], max_frame_size=16 * 1024
+    )
+    await transport.client_initialize(McpClientContext())
+    try:
+        message = await asyncio.wait_for(anext(transport.client_messages()), timeout=2)
+        assert isinstance(message, McpResponse)
+        assert message.id == "large"
+        assert message.result["text"] == "x" * 5000
+    finally:
+        await transport.close()
+
+
+@pytest.mark.asyncio
+async def test_stdio_client_parse_errors_are_ignored_by_default():
+    code = (
+        "import json; "
+        "print('not-json', flush=True); "
+        "print(json.dumps({'jsonrpc': '2.0', 'id': 'ok', 'result': {}}), flush=True)"
+    )
+    transport = McpStdioClientTransport([sys.executable, "-c", code])
+    await transport.client_initialize(McpClientContext())
+
+    try:
+        message = await asyncio.wait_for(anext(transport.client_messages()), timeout=2)
+        assert isinstance(message, McpResponse)
+        assert message.id == "ok"
+    finally:
+        await transport.close()
+
+
+@pytest.mark.asyncio
+async def test_stdio_client_can_throw_parse_errors():
+    code = "print('not-json', flush=True)"
+    transport = McpStdioClientTransport([sys.executable, "-c", code])
+    await transport.client_initialize(
+        McpClientContext(McpClientFlags(throw_mcp_parse_errors=True))
+    )
+
+    try:
+        with pytest.raises(RuntimeError, match="failed to parse stdio message"):
+            await asyncio.wait_for(anext(transport.client_messages()), timeout=2)
+    finally:
+        await transport.close()
+
+
+@pytest.mark.asyncio
+async def test_stdio_server_accepts_large_stdin_message(monkeypatch):
+    payload = (
+        McpListToolsRequest(id="large")
+        .model_dump_json(exclude_none=True)
+        .encode("utf-8")
+    )
+    line = payload[:-1] + b',"params":{"cursor":"' + (b"x" * 200000) + b'"}}\n'
+
+    class FakeStdin:
+        buffer = io.BytesIO(line)
+
+    monkeypatch.setattr(sys, "stdin", FakeStdin())
+    transport = McpStdioServerTransport()
+    await transport.server_initialize(McpServerContext())
+
+    try:
+        message, session_id = await asyncio.wait_for(
+            anext(transport.server_messages()), timeout=2
+        )
+        assert isinstance(message, McpListToolsRequest)
+        assert message.id == "large"
+        assert message.params is not None
+        assert message.params.cursor == "x" * 200000
+        assert session_id is None
+    finally:
+        await transport.close()
+
+
+@pytest.mark.asyncio
+async def test_stdio_server_max_frame_size_is_configurable(monkeypatch):
+    payload = (
+        McpListToolsRequest(id="large")
+        .model_dump_json(exclude_none=True)
+        .encode("utf-8")
+    )
+    line = payload[:-1] + b',"params":{"cursor":"' + (b"x" * 5000) + b'"}}\n'
+
+    class FakeStdin:
+        buffer = io.BytesIO(line)
+
+    monkeypatch.setattr(sys, "stdin", FakeStdin())
+    transport = McpStdioServerTransport(max_frame_size=1024)
+    await transport.server_initialize(McpServerContext())
+
+    try:
+        with pytest.raises(RuntimeError, match="max_frame_size=1024"):
+            await asyncio.wait_for(anext(transport.server_messages()), timeout=2)
+    finally:
+        await transport.close()
+
+
+@pytest.mark.asyncio
+async def test_stdio_server_parse_errors_are_ignored_by_default(monkeypatch):
+    valid = (
+        McpListToolsRequest(id="ok").model_dump_json(exclude_none=True).encode("utf-8")
+    )
+
+    class FakeStdin:
+        buffer = io.BytesIO(b"not-json\n" + valid + b"\n")
+
+    monkeypatch.setattr(sys, "stdin", FakeStdin())
+    transport = McpStdioServerTransport()
+    await transport.server_initialize(McpServerContext())
+
+    try:
+        message, session_id = await asyncio.wait_for(
+            anext(transport.server_messages()), timeout=2
+        )
+        assert isinstance(message, McpListToolsRequest)
+        assert message.id == "ok"
+        assert session_id is None
+    finally:
+        await transport.close()
+
+
+@pytest.mark.asyncio
+async def test_stdio_server_can_throw_parse_errors(monkeypatch):
+    class FakeStdin:
+        buffer = io.BytesIO(b"not-json\n")
+
+    monkeypatch.setattr(sys, "stdin", FakeStdin())
+    transport = McpStdioServerTransport()
+    await transport.server_initialize(
+        McpServerContext(McpServerFlags(throw_mcp_parse_errors=True))
+    )
+
+    try:
+        with pytest.raises(RuntimeError, match="failed to parse stdio message"):
+            await asyncio.wait_for(anext(transport.server_messages()), timeout=2)
     finally:
         await transport.close()
 

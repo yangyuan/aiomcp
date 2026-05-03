@@ -163,6 +163,7 @@ mcp_server = McpServer(
 ```
 
 Available client flags
+- `throw_mcp_parse_errors`: raise when a transport receives malformed MCP JSON-RPC instead of ignoring it.
 - `enforce_mcp_tools_capability`: require the server to advertise the `tools` capability before the client sends `tools/list`.
 - `enforce_mcp_tool_result_content`: reject tool results that omit `content`.
 - `enforce_mcp_version_negotiation`: reject unsupported negotiated protocol versions.
@@ -171,6 +172,7 @@ Available client flags
 - `enforce_mcp_transport_version_consistency`: require HTTP header and initialize body protocol versions to match.
 
 Available server flags
+- `throw_mcp_parse_errors`: raise when a transport receives malformed MCP JSON-RPC instead of ignoring it.
 - `enforce_mcp_initialize_sequence`: reject requests sent before MCP initialization completes.
 - `enforce_mcp_version_negotiation`: negotiate only supported protocol versions.
 - `enforce_mcp_session_header`: require HTTP session headers where applicable.
