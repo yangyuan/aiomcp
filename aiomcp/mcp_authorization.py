@@ -1,4 +1,8 @@
 import asyncio
+import base64
+import hashlib
+import hmac
+import json
 import re
 import secrets
 import time
@@ -9,7 +13,6 @@ from typing import Any, Dict, List, Optional, Protocol, Tuple, runtime_checkable
 import aiohttp
 from aiohttp import web
 from authlib.common.security import generate_token
-from authlib.jose import jwt as authlib_jwt
 from authlib.oauth2.rfc7636 import create_s256_code_challenge
 
 
@@ -543,15 +546,75 @@ class McpAuthorizationServer:
         app.router.add_get("/oauth/approve", self._handle_approve)
         app.router.add_post("/oauth/token", self._handle_token)
 
+    @staticmethod
+    def _jwt_b64encode(value: bytes) -> str:
+        return base64.urlsafe_b64encode(value).rstrip(b"=").decode("ascii")
+
+    @staticmethod
+    def _jwt_b64decode(value: str) -> bytes:
+        padding = "=" * (-len(value) % 4)
+        return base64.urlsafe_b64decode((value + padding).encode("ascii"))
+
+    def _jwt_signature(self, signing_input: bytes) -> bytes:
+        return hmac.new(
+            self._signing_key.encode("utf-8"), signing_input, hashlib.sha256
+        ).digest()
+
+    def _decode_jwt(self, token: str) -> Dict[str, Any]:
+        try:
+            header_segment, payload_segment, signature_segment = token.split(".")
+            signing_input = f"{header_segment}.{payload_segment}".encode("ascii")
+            expected_signature = self._jwt_signature(signing_input)
+            actual_signature = self._jwt_b64decode(signature_segment)
+            if not hmac.compare_digest(actual_signature, expected_signature):
+                raise ValueError("Invalid JWT signature")
+
+            header = json.loads(self._jwt_b64decode(header_segment))
+            if not isinstance(header, dict):
+                raise ValueError("Invalid JWT header")
+            if header.get("alg") != "HS256":
+                raise ValueError("Unsupported JWT algorithm")
+            payload = json.loads(self._jwt_b64decode(payload_segment))
+            if not isinstance(payload, dict):
+                raise ValueError("Invalid JWT payload")
+        except Exception as exc:
+            raise ValueError("Invalid JWT") from exc
+
+        now = int(time.time())
+        exp = payload.get("exp")
+        if exp is not None:
+            if not isinstance(exp, (int, float)) or exp < now:
+                raise ValueError("JWT expired")
+        nbf = payload.get("nbf")
+        if nbf is not None:
+            if not isinstance(nbf, (int, float)) or nbf > now:
+                raise ValueError("JWT is not yet valid")
+        iat = payload.get("iat")
+        if iat is not None:
+            if not isinstance(iat, (int, float)) or iat > now:
+                raise ValueError("JWT issued in the future")
+
+        return payload
+
+    def _encode_jwt(self, payload: Dict[str, Any]) -> str:
+        header = {"alg": "HS256"}
+        header_segment = self._jwt_b64encode(
+            json.dumps(header, separators=(",", ":")).encode("utf-8")
+        )
+        payload_segment = self._jwt_b64encode(
+            json.dumps(payload, separators=(",", ":")).encode("utf-8")
+        )
+        signing_input = f"{header_segment}.{payload_segment}".encode("ascii")
+        signature_segment = self._jwt_b64encode(self._jwt_signature(signing_input))
+        return f"{header_segment}.{payload_segment}.{signature_segment}"
+
     def validate_bearer_token(self, request: web.Request) -> Optional[Dict[str, Any]]:
         auth_header = request.headers.get("Authorization", "")
         if not auth_header.startswith("Bearer "):
             return None
         token = auth_header[7:]
         try:
-            claims = authlib_jwt.decode(token, self._signing_key)
-            claims.validate()
-            return dict(claims)
+            return self._decode_jwt(token)
         except Exception:
             return None
 
@@ -721,8 +784,7 @@ class McpAuthorizationServer:
     async def _handle_token_refresh(self, body: Any) -> web.Response:
         refresh_token = body.get("refresh_token", "")
         try:
-            claims = authlib_jwt.decode(refresh_token, self._signing_key)
-            claims.validate()
+            claims = self._decode_jwt(refresh_token)
         except Exception:
             return web.json_response({"error": "invalid_grant"}, status=400)
 
@@ -743,9 +805,7 @@ class McpAuthorizationServer:
             "scope": scope,
             "type": "access",
         }
-        access_token = authlib_jwt.encode(
-            {"alg": "HS256"}, access_payload, self._signing_key
-        ).decode("utf-8")
+        access_token = self._encode_jwt(access_payload)
 
         refresh_payload = {
             "iss": base,
@@ -755,9 +815,7 @@ class McpAuthorizationServer:
             "scope": scope,
             "type": "refresh",
         }
-        refresh_token = authlib_jwt.encode(
-            {"alg": "HS256"}, refresh_payload, self._signing_key
-        ).decode("utf-8")
+        refresh_token = self._encode_jwt(refresh_payload)
 
         return web.json_response(
             {

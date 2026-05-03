@@ -5,6 +5,7 @@ from typing import Annotated, Any, Dict, List, Literal, Optional, Union
 
 from pydantic import BaseModel, Field
 
+from aiomcp.contracts.mcp_message import McpListToolsResult
 from aiomcp.contracts.mcp_schema import JsonSchema
 from aiomcp.mcp_schema_resolver import McpSchemaResolver
 
@@ -173,6 +174,39 @@ def test_json_schema_preserves_enum_refs_and_null_type():
     assert dumped["$defs"]["Color"]["enum"] == ["red", "blue"]
     assert dumped["properties"]["color"]["$ref"] == "#/$defs/Color"
     assert dumped["properties"]["label"]["anyOf"][1]["type"] == "null"
+
+
+def test_tools_list_accepts_json_schema_null_types():
+    result = McpListToolsResult.model_validate(
+        {
+            "tools": [
+                {
+                    "name": "example",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "value": {
+                                "anyOf": [
+                                    {"type": "string"},
+                                    {"type": "number"},
+                                    {"type": "boolean"},
+                                    {"type": "null"},
+                                ]
+                            },
+                            "nullable_string": {"type": ["string", "null"]},
+                        },
+                    },
+                }
+            ]
+        }
+    )
+
+    dumped = result.model_dump(exclude_none=True)
+    value_schema = dumped["tools"][0]["inputSchema"]["properties"]["value"]
+    nullable_schema = dumped["tools"][0]["inputSchema"]["properties"]["nullable_string"]
+
+    assert value_schema["anyOf"][3]["type"] == "null"
+    assert nullable_schema["type"] == ["string", "null"]
 
 
 def test_return_schema_handling():
