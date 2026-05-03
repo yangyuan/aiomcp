@@ -1,9 +1,11 @@
 from enum import Enum
 import json
+from typing import Annotated
 import pytest
 
 from aiomcp.mcp_server import McpServer
 from aiomcp.mcp_client import McpClient
+from pydantic import Field
 
 input_schema_add = """
 {
@@ -40,6 +42,20 @@ class Color(Enum):
 
 async def echo_color(color: Color) -> Color:
     return color
+
+
+async def annotated_add(
+    a: Annotated[int, Field(description="The first number")],
+    b: Annotated[int, Field(description="The second number")],
+) -> int:
+    return a + b
+
+
+async def templated_add(
+    a: Annotated[int, Field(description="The {FIRST_LABEL} number")],
+    b: Annotated[int, Field(description="The {SECOND_LABEL} number")],
+) -> int:
+    return a + b
 
 
 class AddClass:
@@ -142,3 +158,61 @@ async def test_enum_tool_registration_and_result_serialization():
         assert result == "red"
     finally:
         await client.close()
+
+
+@pytest.mark.asyncio
+async def test_register_tool_accepts_parameter_and_tool_annotations():
+    server = McpServer()
+    await server.register_tool(
+        annotated_add,
+        alias="annotated_add",
+        annotations={
+            "readOnlyHint": True,
+            "destructiveHint": False,
+            "idempotentHint": True,
+            "openWorldHint": False,
+        },
+    )
+
+    tools = await server.list_tools()
+    tool = next(tool for tool in tools if tool.name == "annotated_add")
+    input_schema = tool.inputSchema.model_dump(exclude_none=True)
+    annotations = tool.annotations.model_dump(exclude_none=True)
+
+    assert input_schema["properties"]["a"] == {
+        "type": "integer",
+        "description": "The first number",
+    }
+    assert input_schema["properties"]["b"] == {
+        "type": "integer",
+        "description": "The second number",
+    }
+    assert annotations == {
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": False,
+    }
+
+
+@pytest.mark.asyncio
+async def test_register_tool_applies_format_map_to_metadata():
+    server = McpServer()
+    await server.register_tool(
+        templated_add,
+        description="Add numbers for {AUDIENCE}",
+        format_map={
+            "FIRST_LABEL": "first",
+            "SECOND_LABEL": "second",
+            "AUDIENCE": "testing",
+        },
+    )
+
+    tools = await server.list_tools()
+    tool = next(tool for tool in tools if tool.name == "templated_add")
+    input_schema = tool.inputSchema.model_dump(exclude_none=True)
+
+    assert tool.description == "Add numbers for testing"
+    assert tool.outputSchema.model_dump(exclude_none=True) == {"type": "integer"}
+    assert input_schema["properties"]["a"]["description"] == "The first number"
+    assert input_schema["properties"]["b"]["description"] == "The second number"

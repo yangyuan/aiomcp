@@ -25,7 +25,7 @@ async def test_server_enforce_initialize_sequence():
         transport = McpMemoryTransport()
 
         # Start server hosting
-        await server.create_host_task(transport)
+        await server._create_host_task(transport)
 
         # 1. Send non-initialize request (tools/list)
         req_id = 1
@@ -93,7 +93,7 @@ async def test_server_version_negotiation():
     async def _run():
         server = McpServer(flags={"enforce_mcp_version_negotiation": True})
         transport = McpMemoryTransport()
-        await server.create_host_task(transport)
+        await server._create_host_task(transport)
 
         # 1. Supported version
         req_id = 1
@@ -114,7 +114,7 @@ async def test_server_version_negotiation():
 
         server = McpServer(flags={"enforce_mcp_version_negotiation": True})
         transport = McpMemoryTransport()
-        host_task = await server.create_host_task(transport)
+        await server._create_host_task(transport)
 
         # 2. Unsupported version
         req_id = 2

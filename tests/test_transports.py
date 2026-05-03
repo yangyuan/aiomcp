@@ -566,7 +566,7 @@ async def test_server_cancels_inflight_request():
     server = McpServer()
     await server.register_tool(slow_tool, alias="slow")
     transport = McpMemoryTransport()
-    await server.create_host_task(transport)
+    await server._create_host_task(transport)
 
     try:
         request = McpCallToolRequest(
@@ -609,7 +609,7 @@ async def test_client_responds_to_server_ping_request():
 async def test_server_responds_to_client_ping_request():
     server = McpServer()
     transport = McpMemoryTransport()
-    await server.create_host_task(transport)
+    await server._create_host_task(transport)
 
     try:
         await transport.client_send_message(McpPingRequest(id="server-ping-1"))
@@ -734,7 +734,7 @@ async def test_direct_transport():
 async def test_memory_transport():
     transport = McpMemoryTransport()
     mcp_server = McpServer()
-    await mcp_server.create_host_task(transport)
+    await mcp_server._create_host_task(transport)
     mcp_client = McpClient()
     await _client_driven_validation(transport, mcp_client, mcp_server)
 
@@ -743,7 +743,7 @@ async def test_memory_transport():
 async def test_http_transport(unused_tcp_port):
     port = unused_tcp_port
     mcp_server = McpServer()
-    await mcp_server.create_host_task(f"http://127.0.0.1:{port}/aiomcp")
+    await mcp_server._create_host_task(f"http://127.0.0.1:{port}/aiomcp")
 
     client_transport = McpHttpTransport("127.0.0.1", port, path="/aiomcp")
     mcp_client = McpClient()
@@ -780,7 +780,7 @@ async def test_http_transport_uses_custom_client_headers(unused_tcp_port):
 async def test_http_transport_numeric_request_id(unused_tcp_port):
     port = unused_tcp_port
     mcp_server = McpServer()
-    await mcp_server.create_host_task(f"http://127.0.0.1:{port}/aiomcp")
+    await mcp_server._create_host_task(f"http://127.0.0.1:{port}/aiomcp")
 
     client_transport = McpHttpClientTransport("127.0.0.1", port, path="/aiomcp")
     await client_transport.client_initialize(McpClientContext())
@@ -1120,7 +1120,7 @@ async def test_http_server_requires_session_header(unused_tcp_port):
     port = unused_tcp_port
     server = McpServer()
     server._context.flags.enforce_mcp_session_header = True
-    await server.create_host_task(f"http://127.0.0.1:{port}/aiomcp")
+    await server._create_host_task(f"http://127.0.0.1:{port}/aiomcp")
 
     try:
         request = McpListToolsRequest(id="no-session")
@@ -1145,7 +1145,7 @@ async def test_http_server_requires_protocol_header(unused_tcp_port):
     port = unused_tcp_port
     server = McpServer()
     server._context.flags.enforce_mcp_protocol_header = True
-    await server.create_host_task(f"http://127.0.0.1:{port}/aiomcp")
+    await server._create_host_task(f"http://127.0.0.1:{port}/aiomcp")
 
     initialize_request = McpInitializeRequest(
         id="proto-server",

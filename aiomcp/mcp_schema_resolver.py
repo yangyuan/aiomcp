@@ -1,13 +1,24 @@
 import inspect
 import types
 from enum import Enum
-from typing import Any, Dict, List, Literal, Optional, Union, get_args, get_origin
+from typing import (
+    Annotated,
+    Any,
+    Dict,
+    List,
+    Literal,
+    Optional,
+    Union,
+    get_args,
+    get_origin,
+)
 
 from pydantic import BaseModel
+from pydantic.fields import FieldInfo
+from pydantic_core import PydanticUndefined
 
 
 class McpSchemaResolver:
-
     @staticmethod
     def _json_schema_type_for_values(values: list[Any]) -> Optional[str]:
         if all(value is None for value in values):
@@ -47,7 +58,46 @@ class McpSchemaResolver:
         return schema
 
     @staticmethod
+    def _unwrap_annotated(annotation) -> tuple[Any, tuple[Any, ...]]:
+        if get_origin(annotation) is Annotated:
+            args = get_args(annotation)
+            return args[0], args[1:]
+        return annotation, ()
+
+    @staticmethod
+    def _apply_schema_metadata(
+        schema: Dict[str, Any],
+        metadata: tuple[Any, ...],
+        format_map: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        if not metadata:
+            return schema
+
+        enriched = dict(schema)
+        for item in metadata:
+            if isinstance(item, FieldInfo):
+                if item.title is not None:
+                    enriched["title"] = item.title
+                if item.description is not None:
+                    enriched["description"] = item.description
+                if not item.is_required() and item.default is not PydanticUndefined:
+                    enriched["default"] = item.default
+                if isinstance(item.json_schema_extra, dict):
+                    enriched.update(item.json_schema_extra)
+            elif isinstance(item, dict):
+                enriched.update(item)
+
+        if isinstance(enriched.get("title"), str):
+            enriched["title"] = enriched["title"].format_map(format_map or {})
+        if isinstance(enriched.get("description"), str):
+            enriched["description"] = enriched["description"].format_map(
+                format_map or {}
+            )
+        return enriched
+
+    @staticmethod
     def _is_optional(annotation) -> bool:
+        annotation, _ = McpSchemaResolver._unwrap_annotated(annotation)
         origin = get_origin(annotation)
         return origin in (Union, types.UnionType) and type(None) in get_args(annotation)
 
@@ -60,41 +110,70 @@ class McpSchemaResolver:
         return annotation
 
     @staticmethod
-    def _annotation_to_schema(annotation) -> Dict[str, Any]:
+    def _annotation_to_schema(
+        annotation, format_map: Optional[Dict[str, Any]] = None
+    ) -> Dict[str, Any]:
+        annotation, metadata = McpSchemaResolver._unwrap_annotated(annotation)
         annotation = McpSchemaResolver._remove_optional(annotation)
+        annotation, inner_metadata = McpSchemaResolver._unwrap_annotated(annotation)
+        metadata = inner_metadata + metadata
 
         if inspect.isclass(annotation) and issubclass(annotation, BaseModel):
-            return annotation.model_json_schema()
+            return McpSchemaResolver._apply_schema_metadata(
+                annotation.model_json_schema(), metadata, format_map
+            )
 
         if inspect.isclass(annotation) and issubclass(annotation, Enum):
-            return McpSchemaResolver._values_to_enum_schema(
-                tuple(member.value for member in annotation)
+            return McpSchemaResolver._apply_schema_metadata(
+                McpSchemaResolver._values_to_enum_schema(
+                    tuple(member.value for member in annotation)
+                ),
+                metadata,
+                format_map,
             )
 
         if annotation is int:
-            return {"type": "integer"}
+            return McpSchemaResolver._apply_schema_metadata(
+                {"type": "integer"}, metadata, format_map
+            )
         if annotation is str:
-            return {"type": "string"}
+            return McpSchemaResolver._apply_schema_metadata(
+                {"type": "string"}, metadata, format_map
+            )
         if annotation is bool:
-            return {"type": "boolean"}
+            return McpSchemaResolver._apply_schema_metadata(
+                {"type": "boolean"}, metadata, format_map
+            )
         if annotation is float:
-            return {"type": "number"}
+            return McpSchemaResolver._apply_schema_metadata(
+                {"type": "number"}, metadata, format_map
+            )
 
         origin = get_origin(annotation)
         args = get_args(annotation)
 
         if origin is Literal:
-            return McpSchemaResolver._values_to_enum_schema(args)
+            return McpSchemaResolver._apply_schema_metadata(
+                McpSchemaResolver._values_to_enum_schema(args),
+                metadata,
+                format_map,
+            )
 
         if origin in (list, List):
             if not args:
                 raise ValueError(
                     f"{McpSchemaResolver.__name__} list requires an item type."
                 )
-            return {
-                "type": "array",
-                "items": McpSchemaResolver._annotation_to_schema(args[0]),
-            }
+            return McpSchemaResolver._apply_schema_metadata(
+                {
+                    "type": "array",
+                    "items": McpSchemaResolver._annotation_to_schema(
+                        args[0], format_map
+                    ),
+                },
+                metadata,
+                format_map,
+            )
 
         # dict[str, V]
         if origin in (dict, Dict):
@@ -105,10 +184,16 @@ class McpSchemaResolver:
             key, value = args
             if key is not str:
                 raise ValueError(f"{McpSchemaResolver.__name__} dict keys must be str.")
-            return {
-                "type": "object",
-                "additionalProperties": McpSchemaResolver._annotation_to_schema(value),
-            }
+            return McpSchemaResolver._apply_schema_metadata(
+                {
+                    "type": "object",
+                    "additionalProperties": McpSchemaResolver._annotation_to_schema(
+                        value, format_map
+                    ),
+                },
+                metadata,
+                format_map,
+            )
 
         if origin in (Union, types.UnionType):
             raise TypeError(
@@ -167,7 +252,9 @@ class McpSchemaResolver:
         )
 
     @staticmethod
-    def resolve(function) -> tuple[str, Dict[str, Any], Optional[Dict[str, Any]]]:
+    def resolve(
+        function, format_map: Optional[Dict[str, Any]] = None
+    ) -> tuple[str, Dict[str, Any], Optional[Dict[str, Any]]]:
         signature = McpSchemaResolver._clean_signature(function)
 
         properties: Dict[str, Any] = {}
@@ -187,7 +274,7 @@ class McpSchemaResolver:
                 )
 
             properties[name] = McpSchemaResolver._annotation_to_schema(
-                parameter.annotation
+                parameter.annotation, format_map
             )
             if McpSchemaResolver._is_param_required(parameter, parameter.annotation):
                 required.append(name)
@@ -205,7 +292,7 @@ class McpSchemaResolver:
                     f"{McpSchemaResolver.__name__} unsupported return type: tuple, set, or ellipsis."
                 )
             core = McpSchemaResolver._remove_optional(ret)
-            output_schema = McpSchemaResolver._annotation_to_schema(core)
+            output_schema = McpSchemaResolver._annotation_to_schema(core, format_map)
 
         func_name = McpSchemaResolver._extract_function_name(function)
         return func_name, input_schema, output_schema

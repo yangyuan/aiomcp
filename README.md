@@ -7,8 +7,6 @@ Start with a smooth experience, end with a compliant solution.
 
 ## Tutorial
 
-**Expected Behavior for Version 0.1.0**
-
 ### A simple McpServer
 
 ```python
@@ -35,7 +33,7 @@ await mcp_client.initialize("http://127.0.0.1:8000/mcp")
 sum_value = await mcp_client.invoke("name", {"a": 1, "b": 2})
 # standard MCP functions
 # await mcp_client.mcp_tools_list() -> list[McpTool]
-# await mcp_client.mcp_tools_call(tool: McpTool, request: McpRequest) -> McpResponse | McpError
+# await mcp_client.mcp_tools_call(tool: McpTool, request: McpCallToolRequest) -> McpResponse | McpError
 ```
 
 ### Using McpTransports
@@ -68,6 +66,39 @@ asyncio.create_task(mcp_server.host(transport))
 
 mcp_client = McpClient()
 await mcp_client.initialize(transport)
+```
+
+### Tool metadata
+
+Use `Annotated` with Pydantic `Field` for parameter descriptions, and pass MCP tool annotations when registering tools.
+
+```python
+from typing import Annotated
+
+from pydantic import Field
+
+
+async def get_current_time(
+    timezone: Annotated[
+        str,
+        Field(
+            description="IANA timezone name, e.g. 'Europe/London'. Use '{CURRENT_TIMEZONE}' as local timezone."
+        ),
+    ],
+) -> dict[str, str]:
+    return {"timezone": timezone}
+
+
+await mcp_server.register_tool(
+    get_current_time,
+    annotations={
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": False,
+    },
+    format_map={"CURRENT_TIMEZONE": "America/Los_Angeles"},
+)
 ```
 
 ### Authorization

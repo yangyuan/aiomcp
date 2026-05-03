@@ -23,10 +23,9 @@ async def main() -> None:
     authorization = McpAuthorizationServer()
 
     transport = "http://127.0.0.1:8000/mcp"
-    server_task = await server.create_host_task(transport, authorization=authorization)
     print("OAuth MCP server listening on http://127.0.0.1:8000/mcp", flush=True)
     print("Clients can discover and register automatically.", flush=True)
-    await server_task
+    await server.host(transport, authorization=authorization)
 
 
 if __name__ == "__main__":

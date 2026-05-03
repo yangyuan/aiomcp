@@ -22,8 +22,7 @@ async def main() -> None:
     await server.register_tool(echo, alias="echo")
 
     transport = McpStdioServerTransport()
-    server_task = await server.create_host_task(transport)
-    await server_task
+    await server.host(transport)
 
 
 if __name__ == "__main__":

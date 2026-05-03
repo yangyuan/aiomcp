@@ -1,9 +1,9 @@
 from enum import Enum, IntEnum, StrEnum
 import typing
 import pytest
-from typing import Any, Dict, List, Literal, Optional, Union
+from typing import Annotated, Any, Dict, List, Literal, Optional, Union
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from aiomcp.contracts.mcp_schema import JsonSchema
 from aiomcp.mcp_schema_resolver import McpSchemaResolver
@@ -62,6 +62,63 @@ def test_optional_and_defaults_affect_required():
     assert input_schema["properties"]["d"] == {"type": "string"}
 
     assert output_schema is None
+
+
+def test_annotated_field_metadata_is_applied_to_schema():
+    def f(
+        a: Annotated[str, Field(description="A value", title="Alpha")],
+        b: Optional[Annotated[int, Field(description="B value")]] = None,
+        c: Annotated[list[str], {"description": "C values"}] = [],
+    ) -> None:
+        return None
+
+    _, input_schema, output_schema = McpSchemaResolver.resolve(f)
+
+    props = input_schema["properties"]
+    assert props["a"] == {
+        "type": "string",
+        "title": "Alpha",
+        "description": "A value",
+    }
+    assert props["b"] == {"type": "integer", "description": "B value"}
+    assert props["c"] == {
+        "type": "array",
+        "items": {"type": "string"},
+        "description": "C values",
+    }
+    assert input_schema["required"] == ["a"]
+    assert output_schema is None
+
+
+def test_format_map_is_applied_to_schema_metadata():
+    def f(
+        a: Annotated[
+            str,
+            Field(
+                title="Timezone {LABEL}",
+                description="Use {CURRENT_TIMEZONE}",
+            ),
+        ],
+        b: Annotated[list[str], {"description": "Also {CURRENT_TIMEZONE}"}],
+        mode: Literal["{CURRENT_TIMEZONE}"] = "{CURRENT_TIMEZONE}",
+    ) -> Annotated[str, Field(description="Returned for {AUDIENCE}")]:
+        return a
+
+    _, input_schema, output_schema = McpSchemaResolver.resolve(
+        f,
+        format_map={
+            "CURRENT_TIMEZONE": "Europe/Warsaw",
+            "LABEL": "name",
+            "AUDIENCE": "testing",
+        },
+    )
+
+    props = input_schema["properties"]
+    assert props["a"]["title"] == "Timezone name"
+    assert props["a"]["description"] == "Use Europe/Warsaw"
+    assert props["b"]["description"] == "Also Europe/Warsaw"
+    assert props["mode"]["enum"] == ["{CURRENT_TIMEZONE}"]
+    assert output_schema["description"] == "Returned for testing"
 
 
 def test_list_and_dict_mapping():

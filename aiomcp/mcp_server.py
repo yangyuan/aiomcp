@@ -23,7 +23,7 @@ from aiomcp.mcp_authorization import McpAuthorizationServer
 from aiomcp.mcp_schema_resolver import McpSchemaResolver
 from aiomcp.mcp_transport_resolver import McpTransportResolver
 from aiomcp.transports.base import McpServerTransport
-from aiomcp.contracts.mcp_tool import McpTool
+from aiomcp.contracts.mcp_tool import McpTool, McpToolAnnotations
 from aiomcp.jsonrpc_error_codes import JsonRpcErrorCodes as McpErrorCodes
 from aiomcp.contracts.mcp_message import (
     McpCallToolRequest,
@@ -68,8 +68,14 @@ class McpServer:
         func: Callable,
         alias: Optional[str] = None,
         description: Optional[str] = None,
+        annotations: Optional[Dict[str, Any] | McpToolAnnotations] = None,
+        format_map: Optional[Dict[str, Any]] = None,
     ) -> None:
-        func_name, input_schema, output_schema = McpSchemaResolver.resolve(func)
+        func_name, input_schema, output_schema = McpSchemaResolver.resolve(
+            func, format_map=format_map
+        )
+        if description is not None and format_map is not None:
+            description = description.format_map(format_map)
 
         await self.mcp_tools_register(
             name=alias or func_name,
@@ -77,6 +83,7 @@ class McpServer:
             input_schema=input_schema,
             output_schema=output_schema,
             description=description,
+            annotations=annotations,
         )
 
     async def mcp_tools_register(
@@ -86,20 +93,27 @@ class McpServer:
         input_schema: Dict[str, Any],
         output_schema: Optional[Dict[str, Any]] = None,
         description: Optional[str] = None,
+        annotations: Optional[Dict[str, Any] | McpToolAnnotations] = None,
     ) -> None:
-        inputSchema: Optional[JsonSchema] = None
-        outputSchema: Optional[JsonSchema] = None
+        validated_input_schema: Optional[JsonSchema] = None
+        validated_output_schema: Optional[JsonSchema] = None
+        tool_annotations: Optional[McpToolAnnotations] = None
         try:
-            inputSchema = JsonSchema.model_validate(input_schema)
+            validated_input_schema = JsonSchema.model_validate(input_schema)
         except Exception:
-            inputSchema = None
+            validated_input_schema = None
         if output_schema is not None:
             try:
-                outputSchema = JsonSchema.model_validate(output_schema)
+                validated_output_schema = JsonSchema.model_validate(output_schema)
             except Exception:
-                outputSchema = None
+                validated_output_schema = None
+        if annotations is not None:
+            try:
+                tool_annotations = McpToolAnnotations.model_validate(annotations)
+            except Exception:
+                tool_annotations = None
 
-        if not asyncio.iscoroutinefunction(func):
+        if not inspect.iscoroutinefunction(func):
             # tolerate sync functions by wrapping with async
             async def _async_wrapper(*args, **kwargs):
                 return func(*args, **kwargs)
@@ -111,8 +125,9 @@ class McpServer:
         _tool = McpCallableTool(
             name=name,
             description=description,
-            inputSchema=inputSchema,
-            outputSchema=outputSchema,
+            inputSchema=validated_input_schema,
+            outputSchema=validated_output_schema,
+            annotations=tool_annotations,
             callable_async=callable_async,
         )
         self._tools[name] = _tool
@@ -123,7 +138,7 @@ class McpServer:
     def _server_capabilities(self) -> Dict[str, Any]:
         return {"tools": {}}
 
-    async def create_host_task(
+    async def _create_host_task(
         self,
         transport: McpServerTransport | str,
         authorization: Optional[McpAuthorizationServer] = None,
@@ -152,7 +167,8 @@ class McpServer:
         transport: McpServerTransport | str,
         authorization: Optional[McpAuthorizationServer] = None,
     ) -> None:
-        await self.create_host_task(transport, authorization=authorization)
+        task = await self._create_host_task(transport, authorization=authorization)
+        await task
 
     async def shutdown(self) -> None:
         self._hosting = False
