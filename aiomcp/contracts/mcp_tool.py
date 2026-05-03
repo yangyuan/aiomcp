@@ -1,4 +1,4 @@
-from typing import Optional
+from typing import List, Optional
 from pydantic import BaseModel
 from pydantic import ConfigDict
 
@@ -13,11 +13,19 @@ class McpToolAnnotations(BaseModel):
     openWorldHint: Optional[bool] = None
 
 
+class McpToolIcon(BaseModel):
+    src: str
+    mimeType: Optional[str] = None
+    sizes: Optional[List[str]] = None
+
+
 class McpTool(BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     name: str
+    title: Optional[str] = None
     description: Optional[str] = None
     inputSchema: Optional[JsonSchema] = None
     outputSchema: Optional[JsonSchema] = None
     annotations: Optional[McpToolAnnotations] = None
+    icons: Optional[List[McpToolIcon]] = None

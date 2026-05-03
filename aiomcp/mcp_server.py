@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import inspect
 import json
 from enum import Enum
@@ -23,7 +24,7 @@ from aiomcp.mcp_authorization import McpAuthorizationServer
 from aiomcp.mcp_schema_resolver import McpSchemaResolver
 from aiomcp.mcp_transport_resolver import McpTransportResolver
 from aiomcp.transports.base import McpServerTransport
-from aiomcp.contracts.mcp_tool import McpTool, McpToolAnnotations
+from aiomcp.contracts.mcp_tool import McpTool, McpToolAnnotations, McpToolIcon
 from aiomcp.jsonrpc_error_codes import JsonRpcErrorCodes as McpErrorCodes
 from aiomcp.contracts.mcp_message import (
     McpCallToolRequest,
@@ -50,8 +51,12 @@ class McpCallableTool(McpTool):
 
 
 class McpServer:
+    TOOLS_PAGE_SIZE: int = 128
+
     def __init__(
-        self, name: str = "aiomcp-server", flags: Dict[str, bool] | None = None
+        self,
+        name: str = "aiomcp-server",
+        flags: Dict[str, bool] | None = None,
     ) -> None:
         self._context = McpServerContext(McpServerFlags.model_validate(flags or {}))
         self.name = name
@@ -67,8 +72,10 @@ class McpServer:
         self,
         func: Callable,
         alias: Optional[str] = None,
+        title: Optional[str] = None,
         description: Optional[str] = None,
         annotations: Optional[Dict[str, Any] | McpToolAnnotations] = None,
+        icons: Optional[List[Dict[str, Any] | McpToolIcon]] = None,
         format_map: Optional[Dict[str, Any]] = None,
     ) -> None:
         func_name, input_schema, output_schema = McpSchemaResolver.resolve(
@@ -82,8 +89,10 @@ class McpServer:
             func=func,
             input_schema=input_schema,
             output_schema=output_schema,
+            title=title,
             description=description,
             annotations=annotations,
+            icons=icons,
         )
 
     async def mcp_tools_register(
@@ -92,12 +101,15 @@ class McpServer:
         func: Callable,
         input_schema: Dict[str, Any],
         output_schema: Optional[Dict[str, Any]] = None,
+        title: Optional[str] = None,
         description: Optional[str] = None,
         annotations: Optional[Dict[str, Any] | McpToolAnnotations] = None,
+        icons: Optional[List[Dict[str, Any] | McpToolIcon]] = None,
     ) -> None:
         validated_input_schema: Optional[JsonSchema] = None
         validated_output_schema: Optional[JsonSchema] = None
         tool_annotations: Optional[McpToolAnnotations] = None
+        tool_icons: Optional[List[McpToolIcon]] = None
         try:
             validated_input_schema = JsonSchema.model_validate(input_schema)
         except Exception:
@@ -112,6 +124,18 @@ class McpServer:
                 tool_annotations = McpToolAnnotations.model_validate(annotations)
             except Exception:
                 tool_annotations = None
+        if icons is not None:
+            try:
+                tool_icons = [
+                    (
+                        icon
+                        if isinstance(icon, McpToolIcon)
+                        else McpToolIcon.model_validate(icon)
+                    )
+                    for icon in icons
+                ]
+            except Exception:
+                tool_icons = None
 
         if not inspect.iscoroutinefunction(func):
             # tolerate sync functions by wrapping with async
@@ -124,16 +148,41 @@ class McpServer:
 
         _tool = McpCallableTool(
             name=name,
+            title=title,
             description=description,
             inputSchema=validated_input_schema,
             outputSchema=validated_output_schema,
             annotations=tool_annotations,
+            icons=tool_icons,
             callable_async=callable_async,
         )
         self._tools[name] = _tool
 
     async def list_tools(self) -> List[McpTool]:
         return list(self._tools.values())
+
+    def _tools_fingerprint(self, sorted_names: List[str]) -> str:
+        digest = hashlib.sha256("\0".join(sorted_names).encode("utf-8")).hexdigest()
+        return digest[:16]
+
+    def _paginate_tools(
+        self, cursor: Optional[str]
+    ) -> tuple[Optional[List[McpCallableTool]], Optional[str]]:
+        names = sorted(self._tools.keys())
+        fingerprint = self._tools_fingerprint(names)
+        start = 0
+        if cursor is not None:
+            try:
+                cursor_fingerprint, index_str = cursor.split(":", 1)
+                start = int(index_str)
+            except (ValueError, AttributeError):
+                return None, None
+            if cursor_fingerprint != fingerprint or start < 0 or start > len(names):
+                return None, None
+        end = start + self.TOOLS_PAGE_SIZE
+        page = [self._tools[n] for n in names[start:end]]
+        next_cursor = f"{fingerprint}:{end}" if end < len(names) else None
+        return page, next_cursor
 
     def _server_capabilities(self) -> Dict[str, Any]:
         return {"tools": {}}
@@ -312,10 +361,20 @@ class McpServer:
                             message=f"{McpServer.__name__} request is not a {McpListToolsRequest.__name__}",
                         ),
                     )
-                result = McpListToolsResult(tools=self._tools.values())
+                cursor = request.params.cursor if request.params else None
+                tools, next_cursor = self._paginate_tools(cursor)
+                if cursor is not None and tools is None:
+                    return McpError(
+                        id=request.id,
+                        error=McpSystemError(
+                            code=McpErrorCodes.INVALID_PARAMS,
+                            message=f"{McpServer.__name__} invalid tools/list cursor",
+                        ),
+                    )
+                result = McpListToolsResult(tools=tools or [], nextCursor=next_cursor)
                 return McpResponse(
                     id=request.id,
-                    result=result.model_dump(),
+                    result=result.model_dump(exclude_none=True),
                 )
             elif method == McpMethod.TOOLS_CALL:
                 if not isinstance(request, McpCallToolRequest):
