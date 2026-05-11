@@ -54,6 +54,14 @@ async def echo_color(color: Color) -> Color:
     return color
 
 
+async def sum_payload(payload: list[int]) -> int:
+    return sum(payload)
+
+
+async def echo_text(text: str) -> str:
+    return text
+
+
 async def annotated_add(
     a: Annotated[int, Field(description="The first number")],
     b: Annotated[int, Field(description="The second number")],
@@ -134,10 +142,16 @@ async def test_tool_registration():
     await client.initialize(server)
 
     tools = await client.mcp_tools_list()
+    tools_with_output_schema = {
+        tool.name for tool in tools if tool.outputSchema is not None
+    }
     for t_name in add_tools:
         assert any(t.name == t_name for t in tools)
         result = await client.invoke(t_name, {"a": 1, "b": 2})
-        assert result == 3
+        if t_name in tools_with_output_schema:
+            assert result == 3
+        else:
+            assert result == [{"type": "text", "text": "3"}]
 
         # Invalid request should raise from server-side validation
         with pytest.raises(Exception):
@@ -152,20 +166,39 @@ async def test_enum_tool_registration_and_result_serialization():
     tools = await server.list_tools()
     tool = next(tool for tool in tools if tool.name == "echo_color")
     input_schema = tool.inputSchema.model_dump(exclude_none=True)
-    output_schema = tool.outputSchema.model_dump(exclude_none=True)
 
     assert input_schema["properties"]["color"] == {
         "enum": ["red", "blue"],
         "type": "string",
     }
-    assert output_schema == {"enum": ["red", "blue"], "type": "string"}
+    assert tool.outputSchema is None
 
     client = McpClient()
     await client.initialize(server)
 
     try:
         result = await client.invoke("echo_color", {"color": "red"})
-        assert result == "red"
+        assert result == [{"type": "text", "text": "red"}]
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_raw_top_level_arguments_are_tolerated_for_single_parameter_tools():
+    server = McpServer()
+    await server.register_tool(sum_payload)
+    await server.register_tool(echo_text)
+
+    client = McpClient()
+    await client.initialize(server)
+
+    try:
+        assert await client.invoke("sum_payload", [1, 2, 3]) == [
+            {"type": "text", "text": "6"}
+        ]
+        assert await client.invoke("echo_text", "hello") == [
+            {"type": "text", "text": "hello"}
+        ]
     finally:
         await client.close()
 
@@ -207,7 +240,7 @@ async def test_register_tool_accepts_parameter_and_tool_annotations():
 
 @pytest.mark.asyncio
 async def test_register_tool_applies_format_map_to_metadata():
-    server = McpServer()
+    server = McpServer(flags={"auto_mcp_tool_output_schema": True})
     await server.register_tool(
         templated_add,
         description="Add numbers for {AUDIENCE}",
@@ -226,6 +259,20 @@ async def test_register_tool_applies_format_map_to_metadata():
     assert tool.outputSchema.model_dump(exclude_none=True) == {"type": "integer"}
     assert input_schema["properties"]["a"]["description"] == "The first number"
     assert input_schema["properties"]["b"]["description"] == "The second number"
+
+
+@pytest.mark.asyncio
+async def test_register_tool_can_auto_output_schema_by_flag():
+    server = McpServer(flags={"auto_mcp_tool_output_schema": True})
+    await server.register_tool(echo_color)
+
+    tools = await server.list_tools()
+    tool = next(tool for tool in tools if tool.name == "echo_color")
+
+    assert tool.outputSchema.model_dump(exclude_none=True) == {
+        "enum": ["red", "blue"],
+        "type": "string",
+    }
 
 
 @pytest.mark.asyncio

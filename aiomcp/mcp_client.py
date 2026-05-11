@@ -2,7 +2,8 @@ import asyncio
 import json
 import uuid
 from typing import Any, Dict, List
-from aiomcp.contracts.mcp_schema import JsonSchemaType
+from pydantic import TypeAdapter
+from aiomcp.contracts.mcp_content import McpContent
 from aiomcp.mcp_context import McpClientContext
 from aiomcp.mcp_flag import McpClientFlags
 from aiomcp.mcp_server import McpServer
@@ -320,18 +321,6 @@ class McpClient:
     ) -> McpResponseOrError:
         self._check_initialized()
 
-        if tool.inputSchema is not None and not bypass_client_validation:
-            try:
-                # TODO: add input schema validation (for each field)
-                if tool.inputSchema.type != JsonSchemaType.OBJECT:
-                    raise RuntimeError(
-                        f"{McpClient.__name__} Input schema must be an object"
-                    )
-            except Exception as e:
-                raise RuntimeError(
-                    f"{McpClient.__name__} input validation failed for tool '{tool.name}': {e}"
-                )
-
         response = await self._process(request, timeout=timeout)
 
         if (
@@ -350,17 +339,21 @@ class McpClient:
         return response
 
     async def invoke(
-        self, tool_name: str, arguments: Dict[str, Any], timeout: float | None = None
+        self, tool_name: str, arguments: Any, timeout: float | None = None
     ) -> Any:
+        tool = self._tools.get(tool_name)
         structured = await self.invoke_result(tool_name, arguments, timeout=timeout)
         if structured.isError:
             raise RuntimeError(
-                f"{McpClient.__name__} tool '{tool_name}' returned an error: {self._coerce_tool_result(structured)!r}"
+                f"{McpClient.__name__} tool '{tool_name}' returned an error: {self._coerce_tool_result(structured, output_schema_enabled=tool is not None and tool.outputSchema is not None)!r}"
             )
-        return self._coerce_tool_result(structured)
+        return self._coerce_tool_result(
+            structured,
+            output_schema_enabled=tool is not None and tool.outputSchema is not None,
+        )
 
     async def invoke_result(
-        self, tool_name: str, arguments: Dict[str, Any], timeout: float | None = None
+        self, tool_name: str, arguments: Any, timeout: float | None = None
     ) -> McpCallToolResult:
         self._check_initialized()
         tool = self._tools.get(tool_name)
@@ -380,40 +373,77 @@ class McpClient:
                 f"{McpClient.__name__} error occurred, {response.error.model_dump_json()}"
             )
         try:
-            structured = McpCallToolResult.model_validate(response.result)
+            result = McpCallToolResult.model_validate(response.result)
         except Exception as e:
             raise RuntimeError(f"{McpClient.__name__} failed to parse tool result: {e}")
         if (
             self._context.flags.enforce_mcp_tool_result_content
-            and structured.content is None
+            and result.content is None
         ):
             raise RuntimeError(
                 f"{McpClient.__name__} tool result missing required content"
             )
-        return structured
-
-    def _coerce_tool_result(self, structured: McpCallToolResult) -> Any:
-        if structured.structuredContent is not None:
-            return structured.structuredContent
-
-        content = structured.content or []
-        for block in content:
-            block_type = block.get("type")
-            if block_type == "text":
-                text = block.get("text")
-                if text is None:
-                    continue
-                return self._parse_text_block(text)
-            if block_type == "object":
-                return block.get("data")
-        return None
+        return result
 
     @staticmethod
-    def _parse_text_block(text: str) -> Any:
-        stripped = text.strip()
-        if not stripped:
-            return ""
+    def _as_text_content(value: Any) -> List[Dict[str, Any]]:
+        if isinstance(value, str):
+            text = value
+        else:
+            try:
+                text = json.dumps(value, ensure_ascii=False)
+            except TypeError:
+                text = str(value)
+        return [{"type": "text", "text": text}]
+
+    @staticmethod
+    def _as_content_blocks(value: Any) -> List[Dict[str, Any]]:
         try:
-            return json.loads(text)
-        except json.JSONDecodeError:
-            return text
+            return TypeAdapter(List[McpContent]).dump_python(
+                TypeAdapter(List[McpContent]).validate_python(value),
+                mode="json",
+                exclude_none=True,
+            )
+        except Exception:
+            pass
+
+        try:
+            content = TypeAdapter(McpContent).validate_python(value)
+            return [
+                TypeAdapter(McpContent).dump_python(
+                    content,
+                    mode="json",
+                    exclude_none=True,
+                )
+            ]
+        except Exception:
+            return McpClient._as_text_content(value)
+
+    def _coerce_tool_result(
+        self,
+        structured: McpCallToolResult,
+        *,
+        output_schema_enabled: bool = False,
+    ) -> Any:
+        if output_schema_enabled:
+            return structured.structuredContent
+
+        content = structured.content
+        structured_content = structured.structuredContent
+
+        if self._context.flags.convert_mcp_tool_result_content_format:
+            result = [] if content is None else self._as_content_blocks(content)
+            if structured_content is not None:
+                result.extend(self._as_text_content(structured_content))
+            return result or None
+
+        if content is None and structured_content is None:
+            return None
+        if content is None:
+            return structured_content
+        if structured_content is None:
+            return content
+
+        result = self._as_content_blocks(content)
+        result.extend(self._as_text_content(structured_content))
+        return result

@@ -76,7 +76,7 @@ class McpInitializeRequest(McpRequest):
 
 class McpCallToolParams(BaseModel):
     name: str
-    arguments: Optional[Dict[str, Any]] = None
+    arguments: Optional[Any] = None
 
 
 class McpCallToolRequest(McpRequest):
@@ -114,7 +114,7 @@ class McpInitializeResult(BaseModel):
 
 
 class McpCallToolResult(BaseModel):
-    content: Optional[List[Dict[str, Any]]] = None
+    content: Optional[Any] = None
     isError: Optional[bool] = None
     structuredContent: Optional[Any] = None
 

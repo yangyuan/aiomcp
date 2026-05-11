@@ -253,7 +253,9 @@ class McpSchemaResolver:
 
     @staticmethod
     def resolve(
-        function, format_map: Optional[Dict[str, Any]] = None
+        function,
+        format_map: Optional[Dict[str, Any]] = None,
+        auto_mcp_tool_output_schema: bool = True,
     ) -> tuple[str, Dict[str, Any], Optional[Dict[str, Any]]]:
         signature = McpSchemaResolver._clean_signature(function)
 
@@ -284,7 +286,12 @@ class McpSchemaResolver:
             input_schema["required"] = required
 
         ret = signature.return_annotation
-        if ret is inspect._empty or ret is Any or ret is None:
+        if (
+            not auto_mcp_tool_output_schema
+            or ret is inspect._empty
+            or ret is Any
+            or ret is None
+        ):
             output_schema = None
         else:
             if ret in (tuple, set, Ellipsis):

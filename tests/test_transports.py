@@ -301,7 +301,12 @@ async def _client_driven_validation(
         resp = await client.mcp_tools_call(echo_tool_def, request)
         assert isinstance(resp, McpResponse)
         assert resp.result["structuredContent"] == {"text": "hello"}
-        assert resp.result["content"] == [{"type": "text", "text": '{"text": "hello"}'}]
+        assert resp.result["content"] == [
+            {
+                "type": "text",
+                "text": "Tool returned structured content. See structuredContent.",
+            }
+        ]
         assert resp.result["isError"] is False
 
         result = await client.invoke("echo", {"text": "hello"})
@@ -312,6 +317,33 @@ async def _client_driven_validation(
 
 
 async def structured_content_only_tool():
+    return McpCallToolResult(structuredContent={"value": 42})
+
+
+async def content_blocks_tool():
+    return [
+        {"type": "text", "text": "Here is the preview"},
+        {"type": "image", "data": "abc123", "mimeType": "image/png"},
+    ]
+
+
+async def invalid_content_list_tool():
+    return [{"type": "unknown", "text": "no"}]
+
+
+async def structured_dict_tool():
+    return {"value": 42}
+
+
+async def invalid_call_tool_result_content_tool():
+    return McpCallToolResult(content=[{"type": "text"}])
+
+
+async def missing_call_tool_result_content_tool():
+    return McpCallToolResult()
+
+
+async def missing_content_with_structured_content_tool():
     return McpCallToolResult(structuredContent={"value": 42})
 
 
@@ -333,6 +365,189 @@ async def test_structured_content_only_tool_result_fills_content():
         "isError": False,
         "structuredContent": {"value": 42},
     }
+
+
+@pytest.mark.asyncio
+async def test_call_tool_result_repair_does_not_mutate_user_result():
+    original = McpCallToolResult(structuredContent={"value": 42})
+
+    async def explicit_result_tool():
+        return original
+
+    server = McpServer()
+    await server.mcp_tools_register("structured", explicit_result_tool, {})
+
+    response = await server.process(
+        McpCallToolRequest(
+            id="structured",
+            params=McpCallToolParams(name="structured", arguments={}),
+        )
+    )
+
+    assert isinstance(response, McpResponse)
+    assert response.result == {
+        "content": [{"type": "text", "text": '{"value": 42}'}],
+        "isError": False,
+        "structuredContent": {"value": 42},
+    }
+    assert original.content is None
+    assert original.isError is None
+
+
+@pytest.mark.asyncio
+async def test_no_output_schema_preserves_valid_content_block_lists():
+    server = McpServer()
+    await server.mcp_tools_register("content_blocks", content_blocks_tool, {})
+
+    response = await server.process(
+        McpCallToolRequest(
+            id="content_blocks",
+            params=McpCallToolParams(name="content_blocks", arguments={}),
+        )
+    )
+
+    assert isinstance(response, McpResponse)
+    assert response.result == {
+        "content": [
+            {"type": "text", "text": "Here is the preview"},
+            {"type": "image", "data": "abc123", "mimeType": "image/png"},
+        ],
+        "isError": False,
+    }
+
+
+@pytest.mark.asyncio
+async def test_no_output_schema_wraps_invalid_content_like_json_text():
+    server = McpServer()
+    await server.mcp_tools_register("invalid_content", invalid_content_list_tool, {})
+
+    response = await server.process(
+        McpCallToolRequest(
+            id="invalid_content",
+            params=McpCallToolParams(name="invalid_content", arguments={}),
+        )
+    )
+
+    assert isinstance(response, McpResponse)
+    assert response.result == {
+        "content": [{"type": "text", "text": '[{"type": "unknown", "text": "no"}]'}],
+        "isError": False,
+    }
+
+
+@pytest.mark.asyncio
+async def test_output_schema_uses_structured_content_with_hint_content():
+    server = McpServer()
+    await server.mcp_tools_register(
+        "structured",
+        structured_dict_tool,
+        {},
+        {"type": "object", "properties": {"value": {"type": "integer"}}},
+    )
+
+    response = await server.process(
+        McpCallToolRequest(
+            id="structured",
+            params=McpCallToolParams(name="structured", arguments={}),
+        )
+    )
+
+    assert isinstance(response, McpResponse)
+    assert response.result == {
+        "content": [
+            {
+                "type": "text",
+                "text": "Tool returned structured content. See structuredContent.",
+            }
+        ],
+        "isError": False,
+        "structuredContent": {"value": 42},
+    }
+
+
+@pytest.mark.asyncio
+async def test_output_schema_can_allow_empty_content():
+    server = McpServer(flags={"allow_mcp_tool_result_empty_content": True})
+    await server.mcp_tools_register(
+        "structured",
+        structured_dict_tool,
+        {},
+        {"type": "object", "properties": {"value": {"type": "integer"}}},
+    )
+
+    response = await server.process(
+        McpCallToolRequest(
+            id="structured",
+            params=McpCallToolParams(name="structured", arguments={}),
+        )
+    )
+
+    assert isinstance(response, McpResponse)
+    assert response.result == {
+        "content": [],
+        "isError": False,
+        "structuredContent": {"value": 42},
+    }
+
+
+@pytest.mark.asyncio
+async def test_call_tool_result_content_validation_is_opt_in():
+    server = McpServer(flags={"enforce_mcp_tool_result_content_format": True})
+    await server.mcp_tools_register(
+        "invalid_result", invalid_call_tool_result_content_tool, {}
+    )
+
+    response = await server.process(
+        McpCallToolRequest(
+            id="invalid_result",
+            params=McpCallToolParams(name="invalid_result", arguments={}),
+        )
+    )
+
+    assert isinstance(response, McpError)
+    assert (
+        "content must be a valid list of MCP content blocks" in response.error.message
+    )
+
+
+@pytest.mark.asyncio
+async def test_call_tool_result_content_validation_rejects_missing_content():
+    server = McpServer(flags={"enforce_mcp_tool_result_content_format": True})
+    await server.mcp_tools_register(
+        "missing_result", missing_call_tool_result_content_tool, {}
+    )
+
+    response = await server.process(
+        McpCallToolRequest(
+            id="missing_result",
+            params=McpCallToolParams(name="missing_result", arguments={}),
+        )
+    )
+
+    assert isinstance(response, McpError)
+    assert (
+        "content must be a valid list of MCP content blocks" in response.error.message
+    )
+
+
+@pytest.mark.asyncio
+async def test_call_tool_result_content_validation_runs_before_repair():
+    server = McpServer(flags={"enforce_mcp_tool_result_content_format": True})
+    await server.mcp_tools_register(
+        "missing_content", missing_content_with_structured_content_tool, {}
+    )
+
+    response = await server.process(
+        McpCallToolRequest(
+            id="missing_content",
+            params=McpCallToolParams(name="missing_content", arguments={}),
+        )
+    )
+
+    assert isinstance(response, McpError)
+    assert (
+        "content must be a valid list of MCP content blocks" in response.error.message
+    )
 
 
 class SilentClientTransport(McpClientTransport):

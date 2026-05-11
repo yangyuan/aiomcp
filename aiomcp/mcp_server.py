@@ -13,6 +13,7 @@ from typing import (
 )
 
 from pydantic import BaseModel, TypeAdapter
+from aiomcp.contracts.mcp_content import McpContent
 from aiomcp.contracts.mcp_schema import JsonSchema
 from aiomcp.mcp_flag import McpServerFlags
 from aiomcp.mcp_context import (
@@ -52,6 +53,9 @@ class McpCallableTool(McpTool):
 
 class McpServer:
     TOOLS_PAGE_SIZE: int = 128
+    STRUCTURED_CONTENT_HINT: str = (
+        "Tool returned structured content. See structuredContent."
+    )
 
     def __init__(
         self,
@@ -79,7 +83,9 @@ class McpServer:
         format_map: Optional[Dict[str, Any]] = None,
     ) -> None:
         func_name, input_schema, output_schema = McpSchemaResolver.resolve(
-            func, format_map=format_map
+            func,
+            format_map=format_map,
+            auto_mcp_tool_output_schema=self._context.flags.auto_mcp_tool_output_schema,
         )
         if description is not None and format_map is not None:
             description = description.format_map(format_map)
@@ -268,6 +274,14 @@ class McpServer:
                     pass
         return _kwargs
 
+    async def _call_tool(self, tool: McpCallableTool, arguments: Any) -> Any:
+        if arguments is None:
+            return await tool.callable_async()
+        if isinstance(arguments, dict):
+            _kwargs = self._to_kwargs(tool.callable_async, arguments)
+            return await tool.callable_async(**_kwargs)
+        return await tool.callable_async(arguments)
+
     @staticmethod
     def _to_jsonable(value: Any) -> Any:
         if isinstance(value, Enum):
@@ -287,7 +301,7 @@ class McpServer:
             return value
 
     @staticmethod
-    def _tool_content(value: Any) -> List[Dict[str, Any]]:
+    def _as_text_content(value: Any) -> List[Dict[str, Any]]:
         if isinstance(value, str):
             text = value
         else:
@@ -297,25 +311,68 @@ class McpServer:
                 text = str(value)
         return [{"type": "text", "text": text}]
 
+    @staticmethod
+    def _structured_content_hint() -> List[Dict[str, Any]]:
+        return McpServer._as_text_content(McpServer.STRUCTURED_CONTENT_HINT)
+
+    @staticmethod
+    def _as_content_blocks(value: Any) -> Optional[List[Dict[str, Any]]]:
+        if not isinstance(value, list):
+            return None
+        try:
+            TypeAdapter(List[McpContent]).validate_python(value)
+        except Exception:
+            return None
+        return value
+
+    @staticmethod
+    def _validate_tool_result_content(content: Any) -> None:
+        try:
+            TypeAdapter(List[McpContent]).validate_python(content)
+        except Exception as exc:
+            raise ValueError(
+                f"{McpCallToolResult.__name__}.content must be a valid list of MCP content blocks"
+            ) from exc
+
     def _to_tool_result(
         self, tool: McpCallableTool, value: Any, *, is_error: bool = False
     ) -> McpCallToolResult:
         if isinstance(value, McpCallToolResult):
-            result = value
+            result = value.model_copy(deep=True)
+            # TODO: gate repair code with a flag
+            # This is when user's code specifically return a strong typed McpCallToolResult.
+            # In here we repair the result to ensure that isError and content are set correctly.
+
+            # TODO: if outputSchema, validate
+            if self._context.flags.enforce_mcp_tool_result_content_format:
+                self._validate_tool_result_content(result.content)
             if result.isError is None:
                 result.isError = is_error
             if result.content is None and result.structuredContent is not None:
-                result.content = self._tool_content(result.structuredContent)
+                result.content = self._as_text_content(result.structuredContent)
             return result
 
         value = self._to_jsonable(value)
 
+        if tool.outputSchema is not None and not is_error:
+            content = (
+                []
+                if self._context.flags.allow_mcp_tool_result_empty_content
+                else self._structured_content_hint()
+            )
+            return McpCallToolResult(
+                content=content,
+                isError=is_error,
+                structuredContent=value,
+            )
+
+        content_blocks = None if is_error else self._as_content_blocks(value)
+        if content_blocks is not None:
+            return McpCallToolResult(content=content_blocks, isError=is_error)
+
         return McpCallToolResult(
-            content=self._tool_content(value),
+            content=self._as_text_content(value),
             isError=is_error,
-            structuredContent=(
-                value if tool.outputSchema is not None and not is_error else None
-            ),
         )
 
     async def process(
@@ -386,7 +443,7 @@ class McpServer:
                         ),
                     )
                 name = request.params.name
-                arguments = request.params.arguments or {}
+                arguments = request.params.arguments
                 tool = self._tools.get(name)
                 if tool is None:
                     return McpError(
@@ -397,8 +454,7 @@ class McpServer:
                         ),
                     )
                 try:
-                    _kwargs = self._to_kwargs(tool.callable_async, arguments)
-                    call_result = await tool.callable_async(**_kwargs)
+                    call_result = await self._call_tool(tool, arguments)
                 except Exception as ex:
                     error_result = self._to_tool_result(tool, str(ex), is_error=True)
                     return McpResponse(

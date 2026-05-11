@@ -101,6 +101,40 @@ await mcp_server.register_tool(
 )
 ```
 
+### Tool Results and LLM Compatibility
+
+The MCP specification defines tool results with both `content` and `structuredContent`. The `content` field should be a list of text, image, audio, resource link, or embedded resource blocks. The optional `structuredContent` field is a structured object that follows the tool's output schema when one exists.
+
+As an MCP client, `aiomcp` follows the MCP specification and can optionally convert and merge `content` and `structuredContent` into a standard LLM-friendly content list. If an MCP server does not produce standard output, `aiomcp` still follows the MCP specification while tolerating non-standard behavior on a best-effort basis for maximum compatibility.
+
+As an MCP server, `aiomcp` does not generate or enforce output schemas by default unless you opt in. For best LLM compatibility, tools should consider returning [a list of MCP content blocks](https://modelcontextprotocol.io/specification/2025-11-25/server/tools#tool-result). A simple text response can be a dict like `{"type": "text", "text": "..."}` or a `McpTextContent`; richer responses can use `McpImageContent`, `McpAudioContent`, `McpResourceLink`, or `McpEmbeddedResource`. For advanced control, tools can return `McpCallToolResult` directly, and aiomcp will pass it through as-is. This is the best option when you want full control over what the MCP server returns.
+
+```python
+from aiomcp import McpCallToolResult, McpImageContent, McpTextContent
+
+
+async def use_dict_content():
+    return [
+        # This follows the MCP content contract, not any provider-specific LLM API shape.
+        {"type": "text", "text": "Chart generated."},
+        {"type": "image", "data": "base64-image-data", "mimeType": "image/png"},
+    ]
+
+
+async def use_mcp_contracts():
+    return [
+        McpTextContent(text="Chart generated."),
+        McpImageContent(data="base64-image-data", mimeType="image/png"),
+    ]
+
+
+async def use_call_tool_result():
+    return McpCallToolResult(
+        content=[McpTextContent(text="Chart generated.")],
+        structuredContent={"chartId": "revenue-q1"},
+    )
+```
+
 ### Authorization
 
 Connect to an OAuth 2.1 protected remote MCP server.
@@ -163,9 +197,11 @@ mcp_server = McpServer(
 ```
 
 Available client flags
-- `throw_mcp_parse_errors`: raise when a transport receives malformed MCP JSON-RPC instead of ignoring it.
+- `throw_mcp_contract_errors`: raise error when incoming MCP messages miss required contract fields.
+- `throw_mcp_parse_errors`: raise when a transport receives malformed MCP JSON-RPC.
 - `enforce_mcp_tools_capability`: require the server to advertise the `tools` capability before the client sends `tools/list`.
 - `enforce_mcp_tool_result_content`: reject tool results that omit `content`.
+- `convert_mcp_tool_result_content_format`: convert tool result content in MCP defined format.
 - `enforce_mcp_version_negotiation`: reject unsupported negotiated protocol versions.
 - `enforce_mcp_session_header`: require HTTP session headers where applicable.
 - `enforce_mcp_protocol_header`: require HTTP protocol version headers where applicable.
@@ -177,4 +213,7 @@ Available server flags
 - `enforce_mcp_version_negotiation`: negotiate only supported protocol versions.
 - `enforce_mcp_session_header`: require HTTP session headers where applicable.
 - `enforce_mcp_protocol_header`: require HTTP protocol version headers where applicable.
+- `auto_mcp_tool_output_schema`: create output schemas from registered tool.
+- `enforce_mcp_tool_result_content_format`: validate tool result content against MCP content block.
+- `allow_mcp_tool_result_empty_content`: allow tool results to omit the content.
 
