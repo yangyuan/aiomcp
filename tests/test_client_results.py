@@ -3,6 +3,7 @@ import asyncio
 import pytest
 
 from aiomcp.mcp_client import McpClient, McpInvokeError
+from aiomcp.contracts.mcp_content import McpImageContent, McpTextContent
 from aiomcp.contracts.mcp_schema import JsonSchema
 from aiomcp.contracts.mcp_message import McpCallToolResult, McpResponse
 from aiomcp.contracts.mcp_tool import McpTool
@@ -66,8 +67,8 @@ def test_coerce_combines_content_and_structured_content_by_default():
         )
     )
     assert result == [
-        {"type": "text", "text": "done"},
-        {"type": "text", "text": '{"value": 42}'},
+        McpTextContent(text="done"),
+        McpTextContent(text='{"value": 42}'),
     ]
 
 
@@ -77,7 +78,7 @@ def test_coerce_can_convert_content_format_for_single_content_block():
         McpCallToolResult(content={"type": "text", "text": "done"}),
         convert_mcp_tool_result_content_format=True,
     )
-    assert result == [{"type": "text", "text": "done"}]
+    assert result == [McpTextContent(text="done")]
 
 
 def test_coerce_can_convert_content_format_for_raw_content():
@@ -86,7 +87,7 @@ def test_coerce_can_convert_content_format_for_raw_content():
         McpCallToolResult(content={"value": 42}),
         convert_mcp_tool_result_content_format=True,
     )
-    assert result == [{"type": "text", "text": '{"value": 42}'}]
+    assert result == [McpTextContent(text='{"value": 42}')]
 
 
 def test_coerce_converted_content_format_combines_structured_content():
@@ -99,8 +100,8 @@ def test_coerce_converted_content_format_combines_structured_content():
         convert_mcp_tool_result_content_format=True,
     )
     assert result == [
-        {"type": "image", "data": "abc123", "mimeType": "image/png"},
-        {"type": "text", "text": '{"value": 42}'},
+        McpImageContent(data="abc123", mimeType="image/png"),
+        McpTextContent(text='{"value": 42}'),
     ]
 
 
@@ -114,8 +115,8 @@ def test_coerce_converted_content_format_parses_structured_content_block():
         convert_mcp_tool_result_content_format=True,
     )
     assert result == [
-        {"type": "text", "text": "content"},
-        {"type": "text", "text": "structured"},
+        McpTextContent(text="content"),
+        McpTextContent(text="structured"),
     ]
 
 
@@ -131,8 +132,27 @@ def test_coerce_converted_content_format_parses_structured_content_list():
         convert_mcp_tool_result_content_format=True,
     )
     assert result == [
-        {"type": "text", "text": "one"},
-        {"type": "image", "data": "abc123", "mimeType": "image/png"},
+        McpTextContent(text="one"),
+        McpImageContent(data="abc123", mimeType="image/png"),
+    ]
+
+
+def test_coerce_converted_content_format_preserves_valid_list_items():
+    client = McpClient()
+    result = client._coerce_tool_result(  # type: ignore[attr-defined]
+        McpCallToolResult(
+            structuredContent=[
+                {"type": "text", "text": "one"},
+                {"value": 42},
+                {"type": "image", "data": "abc123", "mimeType": "image/png"},
+            ]
+        ),
+        convert_mcp_tool_result_content_format=True,
+    )
+    assert result == [
+        McpTextContent(text="one"),
+        McpTextContent(text='{"value": 42}'),
+        McpImageContent(data="abc123", mimeType="image/png"),
     ]
 
 
@@ -310,8 +330,8 @@ async def test_invoke_can_convert_content_format_per_call():
             timeout=1,
             convert_mcp_tool_result_content_format=True,
         ) == [
-            {"type": "text", "text": "content"},
-            {"type": "text", "text": "structured"},
+            McpTextContent(text="content"),
+            McpTextContent(text="structured"),
         ]
     finally:
         await client.close()

@@ -3,7 +3,7 @@ import json
 import uuid
 from typing import Any, Dict, List
 from pydantic import TypeAdapter
-from aiomcp.contracts.mcp_content import McpContent
+from aiomcp.contracts.mcp_content import McpContent, McpTextContent
 from aiomcp.mcp_context import McpClientContext
 from aiomcp.mcp_flag import McpClientFlags
 from aiomcp.mcp_server import McpServer
@@ -400,7 +400,7 @@ class McpClient:
         return result
 
     @staticmethod
-    def _as_text_content(value: Any) -> List[Dict[str, Any]]:
+    def _as_text_content(value: Any) -> List[McpContent]:
         if isinstance(value, str):
             text = value
         else:
@@ -408,30 +408,23 @@ class McpClient:
                 text = json.dumps(value, ensure_ascii=False)
             except TypeError:
                 text = str(value)
-        return [{"type": "text", "text": text}]
+        return [McpTextContent(text=text)]
 
     @staticmethod
-    def _as_content_blocks(value: Any) -> List[Dict[str, Any]]:
-        try:
-            return TypeAdapter(List[McpContent]).dump_python(
-                TypeAdapter(List[McpContent]).validate_python(value),
-                mode="json",
-                exclude_none=True,
-                by_alias=True,
-            )
-        except Exception:
-            pass
+    def _as_content_blocks(value: Any) -> List[McpContent]:
+        if isinstance(value, list):
+            result: List[McpContent] = []
+            for item in value:
+                try:
+                    content: McpContent = TypeAdapter(McpContent).validate_python(item)
+                    result.append(content)
+                except Exception:
+                    result.extend(McpClient._as_text_content(item))
+            return result
 
         try:
-            content = TypeAdapter(McpContent).validate_python(value)
-            return [
-                TypeAdapter(McpContent).dump_python(
-                    content,
-                    mode="json",
-                    exclude_none=True,
-                    by_alias=True,
-                )
-            ]
+            content: McpContent = TypeAdapter(McpContent).validate_python(value)
+            return [content]
         except Exception:
             return McpClient._as_text_content(value)
 
