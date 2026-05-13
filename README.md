@@ -5,35 +5,255 @@ A Simple Python MCP Solution
 Start with a smooth experience, end with a compliant solution.
 
 
-## Tutorial
+## Quick Start
 
-### A simple McpServer
+### A Simple STDIO Example
+
+MCP server `server.py`
 
 ```python
-def func(a: int, b: int):
+import asyncio
+
+from aiomcp import McpServer, McpStdioServerTransport
+
+
+async def add(a: int, b: int) -> int:
     return a + b
 
-impl = ToolImpl()
 
-mcp_server = McpServer("mcp-server-name")
-await mcp_server.register_tool(func)
-await mcp_server.register_tool(impl.method, alias="tool_alias")
-await mcp_server.register_tool(ToolImpl.class_method)
-await mcp_server.host("http://127.0.0.1:8000/mcp")
+async def main() -> None:
+    mcp_server = McpServer("mcp-server-name")
+    await mcp_server.register_tool(add)
+    await mcp_server.host(McpStdioServerTransport())
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
 ```
 
-### A simple McpClient
+MCP client `client.py`
 
 ```python
-mcp_client = McpClient("mcp-client-name")
-await mcp_client.initialize("http://127.0.0.1:8000/mcp")
-# await mcp_client.initialize(McpHttpTransport("127.0.0.1", 8000, "/mcp"))
-# await mcp_client.initialize(McpStdioClientTransport([sys.executable, "server.py"]))
-# await mcp_client.initialize(mcp_server) for quick testing without hosting a server
-sum_value = await mcp_client.invoke("name", {"a": 1, "b": 2})
-# standard MCP functions
-# await mcp_client.mcp_tools_list() -> list[McpTool]
-# await mcp_client.mcp_tools_call(tool: McpTool, request: McpCallToolRequest) -> McpResponse | McpError
+import asyncio
+import sys
+
+from aiomcp import McpClient, McpStdioClientTransport
+
+
+async def main() -> None:
+    mcp_client = McpClient("mcp-client-name")
+    await mcp_client.initialize(
+        McpStdioClientTransport([sys.executable, "server.py"])
+    )
+
+    try:
+        sum_value = await mcp_client.invoke("add", {"a": 1, "b": 2})
+        print(sum_value)
+        assert sum_value == 3
+    finally:
+        await mcp_client.close()
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
+```
+
+Run the client from the same directory as `server.py`:
+
+```bash
+python client.py
+```
+
+### A Simple HTTP Example
+
+MCP server `server.py`
+
+```python
+import asyncio
+
+from aiomcp import McpServer
+
+
+async def add(a: int, b: int) -> int:
+    return a + b
+
+
+async def main() -> None:
+    mcp_server = McpServer("mcp-server-name")
+    await mcp_server.register_tool(add)
+    await mcp_server.host("http://127.0.0.1:8000/mcp")
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
+```
+
+Run the server, it will host on `http://127.0.0.1:8000/mcp`
+
+```bash
+python server.py
+```
+
+MCP client `client.py`
+
+```python
+import asyncio
+
+from aiomcp import McpClient
+
+
+async def main() -> None:
+    mcp_client = McpClient("mcp-client-name")
+    await mcp_client.initialize("http://127.0.0.1:8000/mcp")
+
+    try:
+        sum_value = await mcp_client.invoke("add", {"a": 1, "b": 2})
+        assert sum_value == 3
+    finally:
+        await mcp_client.close()
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
+```
+
+Run the client from anywhere in the same machine:
+
+```bash
+python client.py
+```
+
+### A Complete LLM-Friendly HTTP MCP Server
+
+For best compatibility with LLM clients, tools can return an array of MCP content blocks. Each item in the array is one content block, such as text, image, audio, resource link, or embedded resource.
+
+```python
+import asyncio
+
+from aiomcp import McpServer
+
+
+async def screenshot():
+    image_data = get_screenshot_image_data()
+
+    return [
+        {"type": "text", "text": "Here is the captured screenshot."},
+        {"type": "image", "data": image_data, "mimeType": "image/png"},
+    ]
+
+
+async def main() -> None:
+    mcp_server = McpServer("computer-use-server")
+    await mcp_server.register_tool(screenshot)
+    await mcp_server.host("http://127.0.0.1:8000/mcp")
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
+```
+
+### Register Any Python Callable
+
+`register_tool` accepts ordinary Python callables. Use a function, async function, bound method, class method, or static method; aiomcp reads the type hints and exposes the callable as an MCP tool.
+
+```python
+def add(a: int, b: int) -> int:
+    return a + b
+
+
+async def fetch_status(service: str) -> str:
+    return f"{service}: ok"
+
+
+class Calculator:
+    def scale(self, value: float, factor: float = 1.0) -> float:
+        return value * factor
+
+    @classmethod
+    async def add_offset(cls, value: int, offset: int) -> int:
+        return value + offset
+
+    @staticmethod
+    async def total(items: list[int]) -> int:
+        return sum(items)
+
+
+calculator = Calculator()
+
+await mcp_server.register_tool(add)
+await mcp_server.register_tool(fetch_status)
+await mcp_server.register_tool(calculator.scale, alias="calculator_scale")
+await mcp_server.register_tool(Calculator.add_offset)
+await mcp_server.register_tool(Calculator.total)
+```
+
+Clients invoke registered tools by name with a dict of arguments, similar to Python keyword arguments.
+
+```python
+assert await mcp_client.invoke("add", {"a": 1, "b": 2}) == 3
+assert await mcp_client.invoke("calculator_scale", {"value": 3, "factor": 2}) == 6.0
+assert await mcp_client.invoke("total", [1, 2, 3]) == 6
+```
+
+### Customize Parameters and Schemas
+
+Use `Annotated` with Pydantic `Field` for parameter descriptions. Use Pydantic models when a tool takes a structured object.
+
+```python
+from enum import StrEnum
+from typing import Annotated
+
+from pydantic import BaseModel, Field
+
+
+class SearchRequest(BaseModel):
+    query: str
+    limit: int = 5
+
+
+class Tone(StrEnum):
+    WARM = "warm"
+    PRECISE = "precise"
+
+
+async def search(
+    request: SearchRequest,
+    tone: Annotated[Tone, Field(description="Response tone")] = Tone.PRECISE,
+) -> list[str]:
+    return [f"{tone.value}: {request.query}"][: request.limit]
+
+
+await mcp_server.register_tool(
+    search,
+    description="Search documents for the current workspace.",
+    annotations={"readOnlyHint": True, "openWorldHint": False},
+)
+```
+
+### Advanced Tool Registration
+
+Use `mcp_tools_register` when you already have JSON schemas or want exact control over the tool contract.
+
+```python
+def add(a: int, b: int) -> int:
+    return a + b
+
+
+await mcp_server.mcp_tools_register(
+    "add",
+    add,
+    input_schema={
+        "type": "object",
+        "properties": {
+            "a": {"type": "integer", "description": "The first number"},
+            "b": {"type": "integer", "description": "The second number"},
+        },
+        "required": ["a", "b"],
+    },
+    output_schema={"type": "integer"},
+    title="Add Numbers",
+    icons=[{"src": "https://example.com/add.png", "mimeType": "image/png"}],
+)
 ```
 
 ### Using McpTransports
@@ -68,46 +288,13 @@ mcp_client = McpClient()
 await mcp_client.initialize(transport)
 ```
 
-### Tool metadata
-
-Use `Annotated` with Pydantic `Field` for parameter descriptions, and pass MCP tool annotations when registering tools.
-
-```python
-from typing import Annotated
-
-from pydantic import Field
-
-
-async def get_current_time(
-    timezone: Annotated[
-        str,
-        Field(
-            description="IANA timezone name, e.g. 'Europe/London'. Use '{CURRENT_TIMEZONE}' as local timezone."
-        ),
-    ],
-) -> dict[str, str]:
-    return {"timezone": timezone}
-
-
-await mcp_server.register_tool(
-    get_current_time,
-    annotations={
-        "readOnlyHint": True,
-        "destructiveHint": False,
-        "idempotentHint": True,
-        "openWorldHint": False,
-    },
-    format_map={"CURRENT_TIMEZONE": "America/Los_Angeles"},
-)
-```
-
 ### Tool Results and LLM Compatibility
 
 The MCP specification defines tool results with both `content` and `structuredContent`. The `content` field should be a list of text, image, audio, resource link, or embedded resource blocks. The optional `structuredContent` field is a structured object that follows the tool's output schema when one exists.
 
 As an MCP client, `aiomcp` follows the MCP specification and can optionally convert and merge `content` and `structuredContent` into a standard LLM-friendly content list. If an MCP server does not produce standard output, `aiomcp` still follows the MCP specification while tolerating non-standard behavior on a best-effort basis for maximum compatibility.
 
-As an MCP server, `aiomcp` does not generate or enforce output schemas by default unless you opt in. For best LLM compatibility, tools should consider returning [a list of MCP content blocks](https://modelcontextprotocol.io/specification/2025-11-25/server/tools#tool-result). A simple text response can be a dict like `{"type": "text", "text": "..."}` or a `McpTextContent`; richer responses can use `McpImageContent`, `McpAudioContent`, `McpResourceLink`, or `McpEmbeddedResource`. For advanced control, tools can return `McpCallToolResult` directly, and aiomcp will pass it through as-is. This is the best option when you want full control over what the MCP server returns.
+As an MCP server, `aiomcp` generates output schemas from return type hints by default. For content-first LLM responses, omit the return annotation or return `McpCallToolResult` directly so the tool can provide MCP content blocks. A simple text response can be a dict like `{"type": "text", "text": "..."}` or a `McpTextContent`; richer responses can use `McpImageContent`, `McpAudioContent`, `McpResourceLink`, or `McpEmbeddedResource`.
 
 ```python
 from aiomcp import McpCallToolResult, McpImageContent, McpTextContent
@@ -213,7 +400,7 @@ Available server flags
 - `enforce_mcp_version_negotiation`: negotiate only supported protocol versions.
 - `enforce_mcp_session_header`: require HTTP session headers where applicable.
 - `enforce_mcp_protocol_header`: require HTTP protocol version headers where applicable.
-- `auto_mcp_tool_output_schema`: create output schemas from registered tool.
+- `skip_mcp_tool_output_schema`: skip output schema generation for registered tools.
 - `enforce_mcp_tool_result_content_format`: validate tool result content against MCP content block.
 - `allow_mcp_tool_result_empty_content`: allow tool results to omit the content.
 

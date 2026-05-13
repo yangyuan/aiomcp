@@ -14,7 +14,7 @@ Server message serialization currently relies on pydantic and a strict server im
 class McpSerialization:
     @staticmethod
     def process_client_message(message: McpMessage) -> McpMessage:
-        json_str = message.model_dump_json()
+        json_str = message.model_dump_json(by_alias=True)
         adapter = TypeAdapter(McpClientMessageUnion)
         return adapter.validate_json(json_str)
 
@@ -22,6 +22,6 @@ class McpSerialization:
     def process_server_message(message: McpMessage) -> McpMessage:
         # Server may pass a response with "error": null, which is not strictly conforming to the spec, but can be tolerated.
         # TODO: enhance server message serialization by peeking into message fields like "error", "result".
-        json_str = message.model_dump_json()
+        json_str = message.model_dump_json(by_alias=True)
         adapter = TypeAdapter(McpServerMessageUnion)
         return adapter.validate_json(json_str)

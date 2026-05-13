@@ -1,4 +1,5 @@
 from enum import Enum
+import base64
 import json
 from typing import Annotated
 import pytest
@@ -45,6 +46,10 @@ def add_sync(a: int, b: int) -> int:
     return a + b
 
 
+def add(a: int, b: int) -> int:
+    return a + b
+
+
 class Color(Enum):
     RED = "red"
     BLUE = "blue"
@@ -60,6 +65,19 @@ async def sum_payload(payload: list[int]) -> int:
 
 async def echo_text(text: str) -> str:
     return text
+
+
+def mock_get_screenshot_png() -> bytes:
+    return b"png image bytes from browser or screenshot service"
+
+
+async def screenshot_preview():
+    image_data = base64.b64encode(mock_get_screenshot_png()).decode("ascii")
+
+    return [
+        {"type": "text", "text": "Here is the captured screenshot."},
+        {"type": "image", "data": image_data, "mimeType": "image/png"},
+    ]
 
 
 async def annotated_add(
@@ -91,6 +109,10 @@ class AddClass:
     def static_add_sync(a: int, b: int) -> int:
         return a + b
 
+    @classmethod
+    async def class_add_async(cls, a: int, b: int) -> int:
+        return a + b
+
 
 @pytest.mark.asyncio
 async def test_tool_registration():
@@ -102,6 +124,8 @@ async def test_tool_registration():
         add_async,
     )
     add_tools.append("add_async")
+    await server.register_tool(add_sync, alias="add_sync_registered")
+    add_tools.append("add_sync_registered")
     await server.mcp_tools_register(
         "add_sync",
         add_sync,
@@ -119,6 +143,8 @@ async def test_tool_registration():
     add_tools.append("add_static_async")
     await server.register_tool(AddClass.static_add_sync)
     add_tools.append("static_add_sync")
+    await server.register_tool(AddClass.class_add_async)
+    add_tools.append("class_add_async")
 
     add_instance = AddClass()
     await server.register_tool(
@@ -159,6 +185,21 @@ async def test_tool_registration():
 
 
 @pytest.mark.asyncio
+async def test_readme_rpc_style_usage_invokes_registered_function():
+    mcp_server = McpServer()
+    await mcp_server.register_tool(add)
+
+    mcp_client = McpClient("mcp-client-name")
+    await mcp_client.initialize(mcp_server)
+
+    try:
+        sum_value = await mcp_client.invoke("add", {"a": 1, "b": 2})
+        assert sum_value == 3
+    finally:
+        await mcp_client.close()
+
+
+@pytest.mark.asyncio
 async def test_enum_tool_registration_and_result_serialization():
     server = McpServer()
     await server.register_tool(echo_color)
@@ -171,14 +212,17 @@ async def test_enum_tool_registration_and_result_serialization():
         "enum": ["red", "blue"],
         "type": "string",
     }
-    assert tool.outputSchema is None
+    assert tool.outputSchema.model_dump(exclude_none=True) == {
+        "enum": ["red", "blue"],
+        "type": "string",
+    }
 
     client = McpClient()
     await client.initialize(server)
 
     try:
         result = await client.invoke("echo_color", {"color": "red"})
-        assert result == [{"type": "text", "text": "red"}]
+        assert result == "red"
     finally:
         await client.close()
 
@@ -193,11 +237,29 @@ async def test_raw_top_level_arguments_are_tolerated_for_single_parameter_tools(
     await client.initialize(server)
 
     try:
-        assert await client.invoke("sum_payload", [1, 2, 3]) == [
-            {"type": "text", "text": "6"}
-        ]
-        assert await client.invoke("echo_text", "hello") == [
-            {"type": "text", "text": "hello"}
+        assert await client.invoke("sum_payload", [1, 2, 3]) == 6
+        assert await client.invoke("echo_text", "hello") == "hello"
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_tool_can_return_llm_friendly_mixed_content_blocks():
+    server = McpServer()
+    await server.register_tool(screenshot_preview)
+
+    client = McpClient()
+    await client.initialize(server)
+
+    try:
+        result = await client.invoke("screenshot_preview", {})
+        assert result == [
+            {"type": "text", "text": "Here is the captured screenshot."},
+            {
+                "type": "image",
+                "data": "cG5nIGltYWdlIGJ5dGVzIGZyb20gYnJvd3NlciBvciBzY3JlZW5zaG90IHNlcnZpY2U=",
+                "mimeType": "image/png",
+            },
         ]
     finally:
         await client.close()
@@ -240,7 +302,7 @@ async def test_register_tool_accepts_parameter_and_tool_annotations():
 
 @pytest.mark.asyncio
 async def test_register_tool_applies_format_map_to_metadata():
-    server = McpServer(flags={"auto_mcp_tool_output_schema": True})
+    server = McpServer()
     await server.register_tool(
         templated_add,
         description="Add numbers for {AUDIENCE}",
@@ -262,8 +324,8 @@ async def test_register_tool_applies_format_map_to_metadata():
 
 
 @pytest.mark.asyncio
-async def test_register_tool_can_auto_output_schema_by_flag():
-    server = McpServer(flags={"auto_mcp_tool_output_schema": True})
+async def test_register_tool_creates_output_schema_by_default():
+    server = McpServer()
     await server.register_tool(echo_color)
 
     tools = await server.list_tools()
@@ -273,6 +335,17 @@ async def test_register_tool_can_auto_output_schema_by_flag():
         "enum": ["red", "blue"],
         "type": "string",
     }
+
+
+@pytest.mark.asyncio
+async def test_register_tool_can_skip_output_schema_by_flag():
+    server = McpServer(flags={"skip_mcp_tool_output_schema": True})
+    await server.register_tool(echo_color)
+
+    tools = await server.list_tools()
+    tool = next(tool for tool in tools if tool.name == "echo_color")
+
+    assert tool.outputSchema is None
 
 
 @pytest.mark.asyncio

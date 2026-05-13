@@ -1,42 +1,36 @@
-from typing import Any, Dict, List, Literal, Optional, Union
+from typing import List, Literal, Optional, Union
 
-from pydantic import BaseModel, ConfigDict
+from aiomcp.contracts.mcp_common import McpAnnotations, McpIcon, McpMetadataModel
 
 
-class McpTextContent(BaseModel):
-    model_config = ConfigDict(extra="allow")
+class McpContentBlock(McpMetadataModel):
+    annotations: Optional[McpAnnotations] = None
 
+
+class McpTextContent(McpContentBlock):
     type: Literal["text"] = "text"
     text: str
 
 
-class McpImageContent(BaseModel):
-    model_config = ConfigDict(extra="allow")
-
+class McpImageContent(McpContentBlock):
     type: Literal["image"] = "image"
     data: str
     mimeType: str
 
 
-class McpAudioContent(BaseModel):
-    model_config = ConfigDict(extra="allow")
-
+class McpAudioContent(McpContentBlock):
     type: Literal["audio"] = "audio"
     data: str
     mimeType: str
 
 
-class McpTextResourceContents(BaseModel):
-    model_config = ConfigDict(extra="allow")
-
+class McpTextResourceContents(McpMetadataModel):
     uri: str
     text: str
     mimeType: Optional[str] = None
 
 
-class McpBlobResourceContents(BaseModel):
-    model_config = ConfigDict(extra="allow")
-
+class McpBlobResourceContents(McpMetadataModel):
     uri: str
     blob: str
     mimeType: Optional[str] = None
@@ -45,16 +39,12 @@ class McpBlobResourceContents(BaseModel):
 McpResourceContents = Union[McpTextResourceContents, McpBlobResourceContents]
 
 
-class McpEmbeddedResource(BaseModel):
-    model_config = ConfigDict(extra="allow")
-
+class McpEmbeddedResource(McpContentBlock):
     type: Literal["resource"] = "resource"
     resource: McpResourceContents
 
 
-class McpResourceLink(BaseModel):
-    model_config = ConfigDict(extra="allow")
-
+class McpResourceLink(McpContentBlock):
     type: Literal["resource_link"] = "resource_link"
     name: str
     uri: str
@@ -62,7 +52,7 @@ class McpResourceLink(BaseModel):
     description: Optional[str] = None
     mimeType: Optional[str] = None
     size: Optional[int] = None
-    icons: Optional[List[Dict[str, Any]]] = None
+    icons: Optional[List[McpIcon]] = None
 
 
 McpContent = Union[

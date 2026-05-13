@@ -1,7 +1,8 @@
-from typing import List, Optional
+from typing import List, Literal, Optional
 from pydantic import BaseModel
 from pydantic import ConfigDict
 
+from aiomcp.contracts.mcp_common import McpIcon, McpMetadataModel
 from aiomcp.contracts.mcp_schema import JsonSchema
 
 
@@ -13,14 +14,16 @@ class McpToolAnnotations(BaseModel):
     openWorldHint: Optional[bool] = None
 
 
-class McpToolIcon(BaseModel):
-    src: str
-    mimeType: Optional[str] = None
-    sizes: Optional[List[str]] = None
+class McpToolIcon(McpIcon):
+    pass
 
 
-class McpTool(BaseModel):
-    model_config = ConfigDict(arbitrary_types_allowed=True)
+class McpToolExecution(BaseModel):
+    taskSupport: Optional[Literal["forbidden", "optional", "required"]] = None
+
+
+class McpTool(McpMetadataModel):
+    model_config = ConfigDict(arbitrary_types_allowed=True, populate_by_name=True)
 
     name: str
     title: Optional[str] = None
@@ -29,3 +32,4 @@ class McpTool(BaseModel):
     outputSchema: Optional[JsonSchema] = None
     annotations: Optional[McpToolAnnotations] = None
     icons: Optional[List[McpToolIcon]] = None
+    execution: Optional[McpToolExecution] = None

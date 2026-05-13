@@ -272,7 +272,7 @@ class McpHttpClientTransport(McpClientTransport):
             )
 
         context = self._context
-        payload = message.model_dump_json(exclude_none=True)
+        payload = message.model_dump_json(exclude_none=True, by_alias=True)
         headers = await self._build_headers(
             message,
             accept=f"{CONTENT_TYPE_JSON}, {CONTENT_TYPE_STREAM}",
@@ -692,7 +692,7 @@ class McpHttpServerTransport(McpServerTransport):
         if message is None:
             lines.append("data: ")
         else:
-            payload = message.model_dump_json(exclude_none=True)
+            payload = message.model_dump_json(exclude_none=True, by_alias=True)
             for line in payload.splitlines() or [payload]:
                 lines.append(f"data: {line}")
         await response.write(("\n".join(lines) + "\n\n").encode("utf-8"))
@@ -814,7 +814,7 @@ class McpHttpServerTransport(McpServerTransport):
             self._inflight[(session_id, str(message.id))] = future
             await self._client_to_server.put((message, session_id))
             response = await future
-            resp_obj = web.json_response(response.model_dump())
+            resp_obj = web.json_response(response.model_dump(by_alias=True))
 
             session = self._context.get_session(session_id)
             protocol_header_value = session.version.version or request_protocol_version

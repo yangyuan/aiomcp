@@ -403,6 +403,7 @@ class McpClient:
                 TypeAdapter(List[McpContent]).validate_python(value),
                 mode="json",
                 exclude_none=True,
+                by_alias=True,
             )
         except Exception:
             pass
@@ -414,6 +415,7 @@ class McpClient:
                     content,
                     mode="json",
                     exclude_none=True,
+                    by_alias=True,
                 )
             ]
         except Exception:

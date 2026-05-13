@@ -2,6 +2,7 @@ from typing import Annotated, List, Optional, Union, Literal, Dict, Any
 from enum import StrEnum
 from pydantic import BaseModel, Field
 
+from aiomcp.contracts.mcp_common import McpMetadataModel
 from aiomcp.contracts.mcp_tool import McpTool
 
 
@@ -74,9 +75,18 @@ class McpInitializeRequest(McpRequest):
     params: McpInitializeParams
 
 
-class McpCallToolParams(BaseModel):
+class McpRequestParams(McpMetadataModel):
+    pass
+
+
+class McpResult(McpMetadataModel):
+    pass
+
+
+class McpCallToolParams(McpRequestParams):
     name: str
     arguments: Optional[Any] = None
+    task: Optional[Dict[str, Any]] = None
 
 
 class McpCallToolRequest(McpRequest):
@@ -84,7 +94,7 @@ class McpCallToolRequest(McpRequest):
     params: McpCallToolParams
 
 
-class McpListToolsParams(BaseModel):
+class McpListToolsParams(McpRequestParams):
     cursor: Optional[str] = None
 
 
@@ -107,19 +117,19 @@ class McpResponse(McpPackage):
     result: Dict[str, Any]
 
 
-class McpInitializeResult(BaseModel):
+class McpInitializeResult(McpResult):
     capabilities: Dict[str, Any]
     protocolVersion: Optional[str] = None
     serverInfo: Optional[Dict[str, Any]] = None
 
 
-class McpCallToolResult(BaseModel):
+class McpCallToolResult(McpResult):
     content: Optional[Any] = None
     isError: Optional[bool] = None
     structuredContent: Optional[Any] = None
 
 
-class McpListToolsResult(BaseModel):
+class McpListToolsResult(McpResult):
     nextCursor: Optional[str] = None
     tools: list[McpTool]
 

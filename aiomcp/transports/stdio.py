@@ -157,7 +157,10 @@ class McpStdioClientTransport(McpClientTransport):
         if writer.is_closing():
             raise RuntimeError(f"{McpStdioClientTransport.__name__} stdin is closed")
         message = McpSerialization.process_client_message(message)
-        payload = message.model_dump_json(exclude_none=True).encode("utf-8") + b"\n"
+        payload = (
+            message.model_dump_json(exclude_none=True, by_alias=True).encode("utf-8")
+            + b"\n"
+        )
         try:
             writer.write(payload)
             await writer.drain()
@@ -316,7 +319,10 @@ class McpStdioServerTransport(McpServerTransport):
         self, message: McpMessage, session_id: str | None = None
     ) -> bool:
         message = McpSerialization.process_server_message(message)
-        payload = message.model_dump_json(exclude_none=True).encode("utf-8") + b"\n"
+        payload = (
+            message.model_dump_json(exclude_none=True, by_alias=True).encode("utf-8")
+            + b"\n"
+        )
 
         async with self._writer_lock:
             await asyncio.to_thread(self._write_bytes, payload)

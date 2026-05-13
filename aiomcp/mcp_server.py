@@ -85,7 +85,7 @@ class McpServer:
         func_name, input_schema, output_schema = McpSchemaResolver.resolve(
             func,
             format_map=format_map,
-            auto_mcp_tool_output_schema=self._context.flags.auto_mcp_tool_output_schema,
+            skip_mcp_tool_output_schema=self._context.flags.skip_mcp_tool_output_schema,
         )
         if description is not None and format_map is not None:
             description = description.format_map(format_map)
@@ -287,7 +287,7 @@ class McpServer:
         if isinstance(value, Enum):
             return McpServer._to_jsonable(value.value)
         if isinstance(value, BaseModel):
-            return value.model_dump(mode="json")
+            return value.model_dump(mode="json", by_alias=True, exclude_none=True)
         if isinstance(value, dict):
             return {
                 McpServer._to_jsonable(key): McpServer._to_jsonable(item)
@@ -431,7 +431,7 @@ class McpServer:
                 result = McpListToolsResult(tools=tools or [], nextCursor=next_cursor)
                 return McpResponse(
                     id=request.id,
-                    result=result.model_dump(exclude_none=True),
+                    result=result.model_dump(exclude_none=True, by_alias=True),
                 )
             elif method == McpMethod.TOOLS_CALL:
                 if not isinstance(request, McpCallToolRequest):
@@ -444,6 +444,14 @@ class McpServer:
                     )
                 name = request.params.name
                 arguments = request.params.arguments
+                if request.params.task is not None:
+                    return McpError(
+                        id=request.id,
+                        error=McpSystemError(
+                            code=McpErrorCodes.INVALID_PARAMS,
+                            message=f"{McpServer.__name__} does not support task-augmented tools/call",
+                        ),
+                    )
                 tool = self._tools.get(name)
                 if tool is None:
                     return McpError(
@@ -459,12 +467,14 @@ class McpServer:
                     error_result = self._to_tool_result(tool, str(ex), is_error=True)
                     return McpResponse(
                         id=request.id,
-                        result=error_result.model_dump(exclude_none=True),
+                        result=error_result.model_dump(
+                            exclude_none=True, by_alias=True
+                        ),
                     )
                 result = self._to_tool_result(tool, call_result)
                 return McpResponse(
                     id=request.id,
-                    result=result.model_dump(exclude_none=True),
+                    result=result.model_dump(exclude_none=True, by_alias=True),
                 )
             elif method == McpMethod.INITIALIZE:
                 if not isinstance(request, McpInitializeRequest):
@@ -490,7 +500,10 @@ class McpServer:
                     protocolVersion=protocol_version,
                     serverInfo={"name": self.name, "version": "0.0.0"},
                 )
-                return McpResponse(id=request.id, result=result.model_dump())
+                return McpResponse(
+                    id=request.id,
+                    result=result.model_dump(exclude_none=True, by_alias=True),
+                )
             else:
                 return McpError(
                     id=request.id,

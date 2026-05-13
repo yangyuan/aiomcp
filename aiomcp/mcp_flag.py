@@ -24,6 +24,6 @@ class McpServerFlags(BaseModel):
     enforce_mcp_version_negotiation: bool = False
     enforce_mcp_session_header: bool = False
     enforce_mcp_protocol_header: bool = False
-    auto_mcp_tool_output_schema: bool = False
+    skip_mcp_tool_output_schema: bool = False
     enforce_mcp_tool_result_content_format: bool = False
     allow_mcp_tool_result_empty_content: bool = False
