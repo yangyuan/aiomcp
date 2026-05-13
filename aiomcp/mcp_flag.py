@@ -9,7 +9,6 @@ class McpClientFlags(BaseModel):
     throw_mcp_parse_errors: bool = False
     enforce_mcp_tools_capability: bool = False
     enforce_mcp_tool_result_content: bool = False
-    convert_mcp_tool_result_content_format: bool = False
     enforce_mcp_version_negotiation: bool = False
     enforce_mcp_session_header: bool = False
     enforce_mcp_protocol_header: bool = False

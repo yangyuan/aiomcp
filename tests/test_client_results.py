@@ -2,7 +2,7 @@ import asyncio
 
 import pytest
 
-from aiomcp.mcp_client import McpClient
+from aiomcp.mcp_client import McpClient, McpInvokeError
 from aiomcp.contracts.mcp_schema import JsonSchema
 from aiomcp.contracts.mcp_message import McpCallToolResult, McpResponse
 from aiomcp.contracts.mcp_tool import McpTool
@@ -72,28 +72,31 @@ def test_coerce_combines_content_and_structured_content_by_default():
 
 
 def test_coerce_can_convert_content_format_for_single_content_block():
-    client = McpClient(flags={"convert_mcp_tool_result_content_format": True})
+    client = McpClient()
     result = client._coerce_tool_result(  # type: ignore[attr-defined]
-        McpCallToolResult(content={"type": "text", "text": "done"})
+        McpCallToolResult(content={"type": "text", "text": "done"}),
+        convert_mcp_tool_result_content_format=True,
     )
     assert result == [{"type": "text", "text": "done"}]
 
 
 def test_coerce_can_convert_content_format_for_raw_content():
-    client = McpClient(flags={"convert_mcp_tool_result_content_format": True})
+    client = McpClient()
     result = client._coerce_tool_result(  # type: ignore[attr-defined]
-        McpCallToolResult(content={"value": 42})
+        McpCallToolResult(content={"value": 42}),
+        convert_mcp_tool_result_content_format=True,
     )
     assert result == [{"type": "text", "text": '{"value": 42}'}]
 
 
 def test_coerce_converted_content_format_combines_structured_content():
-    client = McpClient(flags={"convert_mcp_tool_result_content_format": True})
+    client = McpClient()
     result = client._coerce_tool_result(  # type: ignore[attr-defined]
         McpCallToolResult(
             content=[{"type": "image", "data": "abc123", "mimeType": "image/png"}],
             structuredContent={"value": 42},
-        )
+        ),
+        convert_mcp_tool_result_content_format=True,
     )
     assert result == [
         {"type": "image", "data": "abc123", "mimeType": "image/png"},
@@ -101,14 +104,60 @@ def test_coerce_converted_content_format_combines_structured_content():
     ]
 
 
+def test_coerce_converted_content_format_parses_structured_content_block():
+    client = McpClient()
+    result = client._coerce_tool_result(  # type: ignore[attr-defined]
+        McpCallToolResult(
+            content=[{"type": "text", "text": "content"}],
+            structuredContent={"type": "text", "text": "structured"},
+        ),
+        convert_mcp_tool_result_content_format=True,
+    )
+    assert result == [
+        {"type": "text", "text": "content"},
+        {"type": "text", "text": "structured"},
+    ]
+
+
+def test_coerce_converted_content_format_parses_structured_content_list():
+    client = McpClient()
+    result = client._coerce_tool_result(  # type: ignore[attr-defined]
+        McpCallToolResult(
+            structuredContent=[
+                {"type": "text", "text": "one"},
+                {"type": "image", "data": "abc123", "mimeType": "image/png"},
+            ]
+        ),
+        convert_mcp_tool_result_content_format=True,
+    )
+    assert result == [
+        {"type": "text", "text": "one"},
+        {"type": "image", "data": "abc123", "mimeType": "image/png"},
+    ]
+
+
 def test_coerce_output_schema_uses_structured_content_only():
-    client = McpClient(flags={"convert_mcp_tool_result_content_format": True})
+    client = McpClient()
     result = client._coerce_tool_result(  # type: ignore[attr-defined]
         McpCallToolResult(
             content=[{"type": "text", "text": "ignore"}],
             structuredContent={"value": 42},
         ),
         output_schema_enabled=True,
+        convert_mcp_tool_result_content_format=True,
+    )
+    assert result == {"value": 42}
+
+
+def test_coerce_can_force_structured_content_only():
+    client = McpClient()
+    result = client._coerce_tool_result(  # type: ignore[attr-defined]
+        McpCallToolResult(
+            content=[{"type": "text", "text": "ignore"}],
+            structuredContent={"value": 42},
+        ),
+        use_structured_content=True,
+        convert_mcp_tool_result_content_format=True,
     )
     assert result == {"value": 42}
 
@@ -117,17 +166,20 @@ def test_client_accepts_flags_dict():
     client = McpClient(
         flags={
             "enforce_mcp_tool_result_content": True,
-            "convert_mcp_tool_result_content_format": True,
         }
     )
 
     assert client._context.flags.enforce_mcp_tool_result_content is True
-    assert client._context.flags.convert_mcp_tool_result_content_format is True
 
 
 def test_client_rejects_unknown_flag():
     with pytest.raises(ValueError):
         McpClient(flags={"unknown_flag": True})
+
+
+def test_client_rejects_invoke_level_conversion_flag():
+    with pytest.raises(ValueError):
+        McpClient(flags={"convert_mcp_tool_result_content_format": True})
 
 
 def test_client_rejects_non_dict_flags():
@@ -195,7 +247,7 @@ async def test_invoke_result_can_enforce_content():
 
 @pytest.mark.asyncio
 async def test_invoke_uses_structured_content_when_tool_has_output_schema():
-    client = McpClient(flags={"convert_mcp_tool_result_content_format": True})
+    client = McpClient()
     client._initialized = True
     client._tools = {
         "structured": McpTool(
@@ -213,5 +265,78 @@ async def test_invoke_uses_structured_content_when_tool_has_output_schema():
 
     try:
         assert await client.invoke("structured", {}, timeout=1) == {"value": 42}
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_invoke_can_force_structured_content_without_output_schema():
+    client = McpClient()
+    client._initialized = True
+    client._tools = {"structured": McpTool(name="structured")}
+    client._transport = ResultTransport(
+        {
+            "content": [{"type": "text", "text": "ignore"}],
+            "structuredContent": {"value": 42},
+        }
+    )
+    client._message_loop = asyncio.create_task(client._handle_message_loop())
+
+    try:
+        assert await client.invoke(
+            "structured", {}, timeout=1, use_structured_content=True
+        ) == {"value": 42}
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_invoke_can_convert_content_format_per_call():
+    client = McpClient()
+    client._initialized = True
+    client._tools = {"rich": McpTool(name="rich")}
+    client._transport = ResultTransport(
+        {
+            "content": {"type": "text", "text": "content"},
+            "structuredContent": {"type": "text", "text": "structured"},
+        }
+    )
+    client._message_loop = asyncio.create_task(client._handle_message_loop())
+
+    try:
+        assert await client.invoke(
+            "rich",
+            {},
+            timeout=1,
+            convert_mcp_tool_result_content_format=True,
+        ) == [
+            {"type": "text", "text": "content"},
+            {"type": "text", "text": "structured"},
+        ]
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_invoke_raises_specific_exception_for_tool_error():
+    client = McpClient()
+    client._initialized = True
+    client._tools = {"broken": McpTool(name="broken")}
+    client._transport = ResultTransport(
+        {
+            "content": [{"type": "text", "text": "failed"}],
+            "structuredContent": {"reason": "failed"},
+            "isError": True,
+        }
+    )
+    client._message_loop = asyncio.create_task(client._handle_message_loop())
+
+    try:
+        with pytest.raises(McpInvokeError) as error_info:
+            await client.invoke("broken", {}, timeout=1, use_structured_content=True)
+        assert error_info.value.tool_name == "broken"
+        assert error_info.value.result.isError is True
+        assert error_info.value.result.content == [{"type": "text", "text": "failed"}]
+        assert error_info.value.result.structuredContent == {"reason": "failed"}
     finally:
         await client.close()

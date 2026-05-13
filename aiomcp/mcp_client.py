@@ -36,6 +36,13 @@ from aiomcp.contracts.mcp_message import (
 )
 
 
+class McpInvokeError(RuntimeError):
+    def __init__(self, tool_name: str, result: McpCallToolResult) -> None:
+        self.tool_name = tool_name
+        self.result = result
+        super().__init__(f"{McpClient.__name__} tool '{tool_name}' returned an error")
+
+
 class McpClient:
     def __init__(
         self,
@@ -339,18 +346,25 @@ class McpClient:
         return response
 
     async def invoke(
-        self, tool_name: str, arguments: Any, timeout: float | None = None
+        self,
+        tool_name: str,
+        arguments: Any,
+        timeout: float | None = None,
+        *,
+        use_structured_content: bool = False,
+        convert_mcp_tool_result_content_format: bool = False,
     ) -> Any:
         tool = self._tools.get(tool_name)
-        structured = await self.invoke_result(tool_name, arguments, timeout=timeout)
-        if structured.isError:
-            raise RuntimeError(
-                f"{McpClient.__name__} tool '{tool_name}' returned an error: {self._coerce_tool_result(structured, output_schema_enabled=tool is not None and tool.outputSchema is not None)!r}"
-            )
-        return self._coerce_tool_result(
-            structured,
+        result = await self.invoke_result(tool_name, arguments, timeout=timeout)
+        if result.isError:
+            raise McpInvokeError(tool_name, result)
+        coerced_result = self._coerce_tool_result(
+            result,
             output_schema_enabled=tool is not None and tool.outputSchema is not None,
+            use_structured_content=use_structured_content,
+            convert_mcp_tool_result_content_format=convert_mcp_tool_result_content_format,
         )
+        return coerced_result
 
     async def invoke_result(
         self, tool_name: str, arguments: Any, timeout: float | None = None
@@ -426,17 +440,19 @@ class McpClient:
         structured: McpCallToolResult,
         *,
         output_schema_enabled: bool = False,
+        use_structured_content: bool = False,
+        convert_mcp_tool_result_content_format: bool = False,
     ) -> Any:
-        if output_schema_enabled:
+        if output_schema_enabled or use_structured_content:
             return structured.structuredContent
 
         content = structured.content
         structured_content = structured.structuredContent
 
-        if self._context.flags.convert_mcp_tool_result_content_format:
+        if convert_mcp_tool_result_content_format:
             result = [] if content is None else self._as_content_blocks(content)
             if structured_content is not None:
-                result.extend(self._as_text_content(structured_content))
+                result.extend(self._as_content_blocks(structured_content))
             return result or None
 
         if content is None and structured_content is None:

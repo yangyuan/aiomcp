@@ -4,7 +4,6 @@ A Simple Python MCP Solution
 ## Mission of aiomcp
 Start with a smooth experience, end with a compliant solution.
 
-
 ## Quick Start
 
 ### A Simple STDIO Example
@@ -152,7 +151,9 @@ if __name__ == "__main__":
     asyncio.run(main())
 ```
 
-### Register Any Python Callable
+## Server Tool Registration
+
+### Register Python Callables as Tools
 
 `register_tool` accepts ordinary Python callables. Use a function, async function, bound method, class method, or static method; aiomcp reads the type hints and exposes the callable as an MCP tool.
 
@@ -256,7 +257,10 @@ await mcp_server.mcp_tools_register(
 )
 ```
 
+## MCP Transports
+
 ### Using McpTransports
+
 While `McpClient` and `McpServer` handle client/server behavior, they are implemented in a platform-agnostic way by using `McpClientTransport`/`McpServerTransport` to handle message streams. Client and server transports usually come in pairs as `McpTransport` implementations.
 
 ```python
@@ -288,16 +292,63 @@ mcp_client = McpClient()
 await mcp_client.initialize(transport)
 ```
 
-### Tool Results and LLM Compatibility
+## Tool Results and LLM Integration
+
+### MCP Tool Result and Invoke Options
 
 The MCP specification defines tool results with both `content` and `structuredContent`. The `content` field should be a list of text, image, audio, resource link, or embedded resource blocks. The optional `structuredContent` field is a structured object that follows the tool's output schema when one exists.
 
-As an MCP client, `aiomcp` follows the MCP specification and can optionally convert and merge `content` and `structuredContent` into a standard LLM-friendly content list. If an MCP server does not produce standard output, `aiomcp` still follows the MCP specification while tolerating non-standard behavior on a best-effort basis for maximum compatibility.
+`McpClient.invoke(...)` accepts per-call result shaping options.
+- `use_structured_content`: return `structuredContent` only, ignoring `content`.
+- `convert_mcp_tool_result_content_format`: return MCP content blocks, parsing both `content` and `structuredContent` as MCP content or lists of MCP content when possible.
 
-As an MCP server, `aiomcp` generates output schemas from return type hints by default. For content-first LLM responses, omit the return annotation or return `McpCallToolResult` directly so the tool can provide MCP content blocks. A simple text response can be a dict like `{"type": "text", "text": "..."}` or a `McpTextContent`; richer responses can use `McpImageContent`, `McpAudioContent`, `McpResourceLink`, or `McpEmbeddedResource`.
+### LLM Integration Client Best Practice
+
+As an MCP client, `aiomcp` follows the MCP specification and uses `content` and `structuredContent` as is by default.
+
+If an MCP server does not produce standard MCP content blocks, `aiomcp` can optionally convert and merge `content` and `structuredContent` into an LLM-friendly content list with `convert_mcp_tool_result_content_format`, making it optimal for LLM integration.
 
 ```python
-from aiomcp import McpCallToolResult, McpImageContent, McpTextContent
+from aiomcp import McpClient, McpInvokeError
+
+
+# This function returns a payload suitable for most LLM API tool results.
+async def call_mcp_tool(
+    client: McpClient,
+    tool_call_id: str,
+    tool_name: str,
+    arguments: dict,
+) -> dict:
+    try:
+        output = await client.invoke(
+            tool_name,  # such as "screenshot"
+            arguments,  # such as {"window": "active"}
+            convert_mcp_tool_result_content_format=True,
+        )
+    except McpInvokeError as error:
+        # The complete raw MCP result is available for logging or recovery.
+        raw_result = error.result
+        output = raw_result.model_dump_json(exclude_none=True, by_alias=True)
+
+    # Use the format that fits best to your LLM API.
+    return {
+        "role": "tool",
+        "tool_call_id": tool_call_id,
+        "content": output,
+    }
+```
+
+For custom tool result handling, use `McpClient.invoke_result(...)` to get the full `McpCallToolResult`.
+
+### LLM Integration Server Best Practice
+
+As an MCP server, `aiomcp` generates output schemas from return type hints by default. Some MCP clients work best with `content`-first results. For broad LLM compatibility, omit the return annotation or set `skip_mcp_tool_output_schema`, then return a list of MCP content blocks. A simple text block can be a dict like `{"type": "text", "text": "..."}` or a `McpTextContent`; richer responses can use `McpImageContent`, `McpAudioContent`, `McpResourceLink`, or `McpEmbeddedResource`.
+
+```python
+from aiomcp import McpCallToolResult, McpImageContent, McpServer, McpTextContent
+
+
+mcp_server = McpServer(flags={"skip_mcp_tool_output_schema": True})
 
 
 async def use_dict_content():
@@ -322,7 +373,7 @@ async def use_call_tool_result():
     )
 ```
 
-### Authorization
+## Authorization
 
 Connect to an OAuth 2.1 protected remote MCP server.
 
@@ -367,7 +418,7 @@ authorization = McpAuthorizationServer()
 await server.host("http://127.0.0.1:8000/mcp", authorization=authorization)
 ```
 
-### Compatibility flags
+## Compatibility flags
 
 `aiomcp` defaults to broad compatibility, so it can connect to a wider range of MCP clients and servers. Compatibility flags let you opt into stricter protocol checks when you want closer MCP enforcement.
 
@@ -388,7 +439,6 @@ Available client flags
 - `throw_mcp_parse_errors`: raise when a transport receives malformed MCP JSON-RPC.
 - `enforce_mcp_tools_capability`: require the server to advertise the `tools` capability before the client sends `tools/list`.
 - `enforce_mcp_tool_result_content`: reject tool results that omit `content`.
-- `convert_mcp_tool_result_content_format`: convert tool result content in MCP defined format.
 - `enforce_mcp_version_negotiation`: reject unsupported negotiated protocol versions.
 - `enforce_mcp_session_header`: require HTTP session headers where applicable.
 - `enforce_mcp_protocol_header`: require HTTP protocol version headers where applicable.

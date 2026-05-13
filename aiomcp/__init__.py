@@ -1,4 +1,4 @@
-from .mcp_client import McpClient
+from .mcp_client import McpClient, McpInvokeError
 from .mcp_server import McpServer
 from .mcp_authorization import (
     McpAuthorizationClient,
