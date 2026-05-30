@@ -1,6 +1,6 @@
 [project]
 name = "aiomcp"
-description = "A Simple Python MCP Solution"
+description = "A Simple, High-Performance Python MCP Solution"
 version = "0.0.13"
 requires-python = ">=3.11"
 readme = "README.md"

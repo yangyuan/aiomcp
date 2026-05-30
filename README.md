@@ -1,8 +1,5 @@
 # aiomcp
-A Simple Python MCP Solution
-
-## Mission of aiomcp
-Start with a smooth experience, end with a compliant solution.
+A Simple, High-Performance Python MCP Solution — Simple to use, built for performance
 
 ## Quick Start
 
