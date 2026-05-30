@@ -2,8 +2,8 @@ from asyncio import Queue
 from typing import AsyncIterator
 from aiomcp.contracts.mcp_message import McpMessage
 from aiomcp.mcp_serialization import McpSerialization
-from aiomcp.transports.base import McpTransport
-from aiomcp.mcp_context import McpServerContext, McpClientContext
+from aiomcp.transports.base import McpServerTransportEnvelope, McpTransport
+from aiomcp.mcp_context import DEFAULT_SESSION_ID, McpServerContext, McpClientContext
 
 
 class McpMemoryTransport(McpTransport):
@@ -27,13 +27,16 @@ class McpMemoryTransport(McpTransport):
     async def server_initialize(self, context: McpServerContext):
         pass
 
-    async def server_messages(self) -> AsyncIterator[tuple[McpMessage, str | None]]:
+    async def server_messages(self) -> AsyncIterator[McpServerTransportEnvelope]:
         while True:
             message = await self._client_to_server.get()
-            yield message, None
+            yield McpServerTransportEnvelope(message, DEFAULT_SESSION_ID)
 
     async def server_send_message(
-        self, message: McpMessage, session_id: str | None = None
+        self,
+        message: McpMessage,
+        session_id: str | None = None,
+        transport_correlation_id: str | None = None,
     ) -> bool:
         message = McpSerialization.process_server_message(message)
         await self._server_to_client.put(message)

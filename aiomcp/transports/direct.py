@@ -8,7 +8,7 @@ from aiomcp.contracts.mcp_message import (
     McpRequest,
     McpResponseOrError,
 )
-from aiomcp.mcp_context import McpClientContext
+from aiomcp.mcp_context import DEFAULT_SESSION_ID, McpClientContext
 from aiomcp.mcp_serialization import McpSerialization
 from aiomcp.jsonrpc_error_codes import JsonRpcErrorCodes as McpErrorCodes
 from aiomcp.transports.base import McpClientTransport
@@ -19,7 +19,9 @@ from aiomcp.transports.base import McpClientTransport
 # A server-like object to minimize transport's knowledge of server internals.
 @runtime_checkable
 class McpServerLike(Protocol):
-    async def process(self, req: McpRequest) -> McpResponseOrError: ...
+    async def process(
+        self, req: McpRequest, session_id: str | None = None
+    ) -> McpResponseOrError: ...
 
 
 class McpDirectClientTransport(McpClientTransport):
@@ -43,7 +45,7 @@ class McpDirectClientTransport(McpClientTransport):
         if isinstance(message, McpRequest):
             try:
                 message = McpSerialization.process_client_message(message)
-                response = await self._server.process(message)
+                response = await self._server.process(message, DEFAULT_SESSION_ID)
                 response = McpSerialization.process_server_message(response)
                 await self._server_to_client.put(response)
             except Exception as e:

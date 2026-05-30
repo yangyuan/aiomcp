@@ -12,7 +12,11 @@ from pydantic import BaseModel
 
 from aiomcp.mcp_server import McpServer
 from aiomcp.mcp_client import McpClient
-from aiomcp.mcp_context import McpClientContext, McpServerContext
+from aiomcp.mcp_context import (
+    McpClientContext,
+    McpServerContext,
+    DEFAULT_SESSION_ID,
+)
 from aiomcp.mcp_flag import McpClientFlags, McpServerFlags
 from aiomcp.contracts.mcp_message import (
     McpCallToolParams,
@@ -26,6 +30,7 @@ from aiomcp.contracts.mcp_message import (
     McpInitializeResult,
     McpListToolsRequest,
     McpListToolsResult,
+    McpMessage,
     McpNotification,
     McpPingRequest,
     McpResponse,
@@ -33,7 +38,11 @@ from aiomcp.contracts.mcp_message import (
 )
 from aiomcp.contracts.mcp_tool import McpTool
 from aiomcp.jsonrpc_error_codes import JsonRpcErrorCodes
-from aiomcp.transports.base import McpClientTransport
+from aiomcp.transports.base import (
+    McpClientTransport,
+    McpServerTransport,
+    McpServerTransportEnvelope,
+)
 from aiomcp.transports.direct import McpDirectTransport
 from aiomcp.transports.memory import McpMemoryTransport
 from aiomcp.transports.http import (
@@ -1003,7 +1012,7 @@ async def test_stdio_server_accepts_large_stdin_message(monkeypatch):
         assert message.id == "large"
         assert message.params is not None
         assert message.params.cursor == "x" * 200000
-        assert session_id is None
+        assert session_id == DEFAULT_SESSION_ID
     finally:
         await transport.close()
 
@@ -1050,7 +1059,7 @@ async def test_stdio_server_parse_errors_are_ignored_by_default(monkeypatch):
         )
         assert isinstance(message, McpListToolsRequest)
         assert message.id == "ok"
-        assert session_id is None
+        assert session_id == DEFAULT_SESSION_ID
     finally:
         await transport.close()
 
@@ -1271,6 +1280,207 @@ async def test_http_client_recovers_expired_session(unused_tcp_port):
 
 
 @pytest.mark.asyncio
+async def test_server_context_bounds_sessions_and_tombstones():
+    context = McpServerContext(McpServerFlags(), max_sessions=1, max_expired_sessions=1)
+    released_session_ids: list[str] = []
+    context.add_session_release_callback(released_session_ids.append)
+
+    first_session = context.get_session("first")
+    assert first_session.id == "first"
+
+    second_session = context.get_session("second")
+    assert second_session.id == "second"
+    assert released_session_ids == ["first"]
+    assert context.is_session_expired("first") is True
+
+    third_session = context.get_session("third")
+    assert third_session.id == "third"
+    assert released_session_ids == ["first", "second"]
+    assert context.is_session_expired("first") is False
+    assert context.is_session_expired("second") is True
+    assert [session.id for session in context.iter_sessions()] == ["third"]
+
+
+@pytest.mark.asyncio
+async def test_server_cancels_request_tasks_on_session_release():
+    server = McpServer(max_sessions=1, max_expired_sessions=1)
+    old_task = asyncio.create_task(asyncio.sleep(10))
+    old_task_key = server._session_task_key("old", "pending", "response-key")
+    server._request_tasks[old_task_key] = old_task
+    server._request_task_sessions[old_task_key] = "old"
+
+    try:
+        server._context.get_session("old")
+        server._context.get_session("new")
+        await asyncio.sleep(0)
+
+        assert old_task_key not in server._request_tasks
+        assert old_task.cancelled() is True
+    finally:
+        if not old_task.done():
+            old_task.cancel()
+        await server.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_server_releases_transport_correlated_request_on_session_release():
+    class QueueServerTransport(McpServerTransport):
+        def __init__(self) -> None:
+            self.incoming: asyncio.Queue[McpServerTransportEnvelope | None] = (
+                asyncio.Queue()
+            )
+            self.sent: asyncio.Queue[tuple[McpMessage, str | None, str | None]] = (
+                asyncio.Queue()
+            )
+
+        async def server_initialize(self, context: McpServerContext):
+            pass
+
+        async def server_messages(self) -> AsyncIterator[McpServerTransportEnvelope]:
+            while True:
+                message = await self.incoming.get()
+                if message is None:
+                    break
+                yield message
+
+        async def server_send_message(
+            self,
+            message: McpMessage,
+            session_id: str | None = None,
+            transport_correlation_id: str | None = None,
+        ) -> bool:
+            await self.sent.put((message, session_id, transport_correlation_id))
+            return True
+
+        async def close(self):
+            await self.incoming.put(None)
+
+    server = McpServer(max_sessions=1, max_expired_sessions=1)
+    transport = QueueServerTransport()
+    started = asyncio.Event()
+
+    async def wait_forever() -> str:
+        started.set()
+        await asyncio.Future()
+        return "done"
+
+    await server.register_tool(wait_forever)
+
+    try:
+        await server._create_host_task(transport)
+        server._context.get_session("old")
+        await transport.incoming.put(
+            McpServerTransportEnvelope(
+                McpCallToolRequest(
+                    id="pending",
+                    params=McpCallToolParams(name="wait_forever", arguments={}),
+                ),
+                "old",
+                "response-key",
+            )
+        )
+        await asyncio.wait_for(started.wait(), timeout=1)
+
+        server._context.get_session("new")
+
+        message, session_id, transport_correlation_id = await asyncio.wait_for(
+            transport.sent.get(), timeout=1
+        )
+        assert isinstance(message, McpError)
+        assert message.id == "pending"
+        assert message.error.code == JsonRpcErrorCodes.INVALID_REQUEST
+        assert session_id == "old"
+        assert transport_correlation_id == "response-key"
+        assert server._request_tasks == {}
+        assert server._request_task_sessions == {}
+    finally:
+        await server.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_server_enforces_initialize_sequence_for_sessionless_request():
+    server = McpServer(flags={"enforce_mcp_initialize_sequence": True})
+
+    response = await server.process(McpListToolsRequest(id="sessionless-list"), None)
+
+    assert isinstance(response, McpError)
+    assert response.error.code == JsonRpcErrorCodes.INVALID_REQUEST
+
+
+@pytest.mark.asyncio
+async def test_http_server_sessionless_post_is_transient(unused_tcp_port):
+    port = unused_tcp_port
+    transport = McpHttpServerTransport("127.0.0.1", port, path="/aiomcp")
+    await transport.server_initialize(McpServerContext())
+
+    try:
+
+        async def _serve_once() -> None:
+            envelope = await asyncio.wait_for(
+                transport.server_messages().__anext__(), timeout=1
+            )
+            message = envelope.message
+            assert isinstance(message, McpListToolsRequest)
+            assert envelope.session_id is None
+            assert envelope.transport_correlation_id is not None
+            future = transport._inflight.get(
+                (envelope.transport_correlation_id, "sessionless-list")
+            )
+            assert future is not None
+            future.set_result(McpResponse(id="sessionless-list", result={"tools": []}))
+
+        request = McpListToolsRequest(id="sessionless-list")
+        payload = request.model_dump_json(exclude_none=True)
+        serve_task = asyncio.create_task(_serve_once())
+        async with aiohttp.ClientSession() as session:
+            response = await session.post(
+                f"http://127.0.0.1:{port}/aiomcp",
+                data=payload,
+                headers={
+                    HEADER_CONTENT_TYPE: "application/json",
+                    HEADER_ACCEPT: "application/json, text/event-stream",
+                    HEADER_MCP_PROTOCOL_VERSION: "2025-11-25",
+                },
+            )
+
+            body = await response.json()
+            assert response.status == 200
+            assert body["id"] == "sessionless-list"
+            assert body["result"] == {"tools": []}
+            assert HEADER_MCP_SESSION_ID not in response.headers
+        await serve_task
+
+        assert list(transport._context.iter_sessions()) == []
+    finally:
+        await transport.close()
+
+
+@pytest.mark.asyncio
+async def test_http_server_rejects_sessionless_get_delete(unused_tcp_port):
+    port = unused_tcp_port
+    transport = McpHttpServerTransport("127.0.0.1", port, path="/aiomcp")
+    await transport.server_initialize(McpServerContext())
+
+    try:
+        async with aiohttp.ClientSession() as session:
+            get_response = await session.get(
+                f"http://127.0.0.1:{port}/aiomcp",
+                headers={HEADER_MCP_PROTOCOL_VERSION: "2025-11-25"},
+            )
+            await get_response.read()
+            assert get_response.status == 400
+
+            delete_response = await session.delete(
+                f"http://127.0.0.1:{port}/aiomcp",
+                headers={HEADER_MCP_PROTOCOL_VERSION: "2025-11-25"},
+            )
+            await delete_response.read()
+            assert delete_response.status == 400
+    finally:
+        await transport.close()
+
+
+@pytest.mark.asyncio
 async def test_http_client_resumes_sse_with_last_event_id(unused_tcp_port):
     port = unused_tcp_port
     last_event_ids: list[str | None] = []
@@ -1338,12 +1548,14 @@ async def test_http_server_get_sse_channel_sends_one_stream(unused_tcp_port):
                 f"http://127.0.0.1:{port}/aiomcp",
                 headers={
                     HEADER_ACCEPT: "text/event-stream",
+                    HEADER_MCP_SESSION_ID: "sse-session",
                     HEADER_MCP_PROTOCOL_VERSION: "2025-11-25",
                 },
             ) as response:
                 assert response.status == 200
                 sent = await transport.server_send_message(
-                    McpNotification(method="notifications/tools/list_changed")
+                    McpNotification(method="notifications/tools/list_changed"),
+                    session_id="sse-session",
                 )
                 assert sent is True
 

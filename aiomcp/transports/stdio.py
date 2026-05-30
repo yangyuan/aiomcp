@@ -10,8 +10,12 @@ from aiomcp.contracts.mcp_message import (
     McpServerMessageUnion,
 )
 from aiomcp.mcp_serialization import McpSerialization
-from aiomcp.transports.base import McpClientTransport, McpServerTransport
-from aiomcp.mcp_context import McpServerContext, McpClientContext
+from aiomcp.transports.base import (
+    McpClientTransport,
+    McpServerTransport,
+    McpServerTransportEnvelope,
+)
+from aiomcp.mcp_context import DEFAULT_SESSION_ID, McpServerContext, McpClientContext
 
 STDIO_CHUNK_SIZE = 64 * 1024
 
@@ -306,17 +310,20 @@ class McpStdioServerTransport(McpServerTransport):
             await self._client_to_server.put(message)
         await self._client_to_server.put(None)
 
-    async def server_messages(self) -> AsyncIterator[tuple[McpMessage, str | None]]:
+    async def server_messages(self) -> AsyncIterator[McpServerTransportEnvelope]:
         while True:
             message = await self._client_to_server.get()
             if message is None:
                 break
             if isinstance(message, BaseException):
                 raise message
-            yield message, None
+            yield McpServerTransportEnvelope(message, DEFAULT_SESSION_ID)
 
     async def server_send_message(
-        self, message: McpMessage, session_id: str | None = None
+        self,
+        message: McpMessage,
+        session_id: str | None = None,
+        transport_correlation_id: str | None = None,
     ) -> bool:
         message = McpSerialization.process_server_message(message)
         payload = (

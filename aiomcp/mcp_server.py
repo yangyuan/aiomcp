@@ -60,17 +60,46 @@ class McpServer:
     def __init__(
         self,
         name: str = "aiomcp-server",
-        flags: Dict[str, bool] | None = None,
+        flags: Dict[str, Any] | None = None,
+        max_sessions: int = 1000,
+        max_expired_sessions: int = 1000,
     ) -> None:
-        self._context = McpServerContext(McpServerFlags.model_validate(flags or {}))
+        self._context = McpServerContext(
+            McpServerFlags.model_validate(flags or {}),
+            max_sessions=max_sessions,
+            max_expired_sessions=max_expired_sessions,
+        )
+        self._context.add_session_release_callback(self._release_session_runtime)
         self.name = name
         self._tools: Dict[str, McpCallableTool] = {}
+        self._request_tasks: Dict[tuple[str, int | str], asyncio.Task] = {}
+        self._request_task_sessions: Dict[tuple[str, int | str], str] = {}
+        self._client_cancelled_request_tasks: set[tuple[str, int | str]] = set()
         self._hosting: bool = False  # TODO: remove once enable multiple hosting.
         self._message_loop: Optional[asyncio.Task] = None
         self._server_transport: Optional[McpServerTransport] = None
 
     def _get_session(self, session_id: Optional[str]) -> McpSession:
         return self._context.get_session(session_id)
+
+    def _session_task_key(
+        self,
+        session_id: Optional[str],
+        request_id: int | str,
+        transport_correlation_id: Optional[str] = None,
+    ):
+        return (
+            transport_correlation_id or self._context.normalize_session_id(session_id),
+            request_id,
+        )
+
+    def _release_session_runtime(self, session_id: str) -> None:
+        for key, task in list(self._request_tasks.items()):
+            if self._request_task_sessions.get(key) == session_id:
+                self._request_tasks.pop(key, None)
+                self._request_task_sessions.pop(key, None)
+                if not task.done():
+                    task.cancel()
 
     async def register_tool(
         self,
@@ -238,17 +267,18 @@ class McpServer:
             except Exception:
                 pass
 
-        for session in self._context.iter_sessions():
-            tasks = list(session.request_tasks.values())
-            session.request_tasks.clear()
-            for task in tasks:
-                task.cancel()
-                try:
-                    await task
-                except asyncio.CancelledError:
-                    pass
-                except Exception:
-                    pass
+        tasks = list(self._request_tasks.values())
+        self._request_tasks.clear()
+        self._request_task_sessions.clear()
+        self._client_cancelled_request_tasks.clear()
+        for task in tasks:
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                pass
 
         transport = self._server_transport
         self._server_transport = None
@@ -383,8 +413,10 @@ class McpServer:
             method = request.method
 
             if self._context.flags.enforce_mcp_initialize_sequence:
-                session = self._get_session(session_id)
-                if session.status == McpSessionStatus.UNINITIALIZED and method not in (
+                session = (
+                    self._get_session(session_id) if session_id is not None else None
+                )
+                if session is None and method not in (
                     McpMethod.INITIALIZE,
                     McpMethod.PING,
                 ):
@@ -396,7 +428,24 @@ class McpServer:
                         ),
                     )
                 if (
-                    session.status == McpSessionStatus.INITIALIZING
+                    session is not None
+                    and session.status == McpSessionStatus.UNINITIALIZED
+                    and method
+                    not in (
+                        McpMethod.INITIALIZE,
+                        McpMethod.PING,
+                    )
+                ):
+                    return McpError(
+                        id=request.id,
+                        error=McpSystemError(
+                            code=McpErrorCodes.INVALID_REQUEST,
+                            message=f"{McpServer.__name__} not initialized",
+                        ),
+                    )
+                if (
+                    session is not None
+                    and session.status == McpSessionStatus.INITIALIZING
                     and method != McpMethod.PING
                 ):
                     return McpError(
@@ -486,15 +535,25 @@ class McpServer:
                         ),
                     )
 
-                session = self._get_session(session_id)
-                protocol_version = session.version.default_version
+                session = (
+                    self._get_session(session_id) if session_id is not None else None
+                )
+                protocol_version = (
+                    session.version.default_version
+                    if session is not None
+                    else McpVersion().default_version
+                )
                 if self._context.flags.enforce_mcp_version_negotiation:
                     client_version = request.params.protocolVersion
                     if client_version:
-                        protocol_version = session.version.negotiate(client_version)
+                        version = (
+                            session.version if session is not None else McpVersion()
+                        )
+                        protocol_version = version.negotiate(client_version)
 
-                session.status = McpSessionStatus.INITIALIZING
-                session.version.negotiate(protocol_version)
+                if session is not None:
+                    session.status = McpSessionStatus.INITIALIZING
+                    session.version.negotiate(protocol_version)
                 result = McpInitializeResult(
                     capabilities=self._server_capabilities(),
                     protocolVersion=protocol_version,
@@ -523,33 +582,91 @@ class McpServer:
 
     async def _handle_message_loop(self, transport: McpServerTransport) -> None:
         async def _handle_request(
-            request: McpRequest | McpServerRequest, session_id: str | None
+            request: McpRequest | McpServerRequest,
+            session_id: str | None,
+            transport_correlation_id: str | None,
         ) -> None:
-            session = self._get_session(session_id)
             task = asyncio.current_task()
+            task_key = self._session_task_key(
+                session_id, request.id, transport_correlation_id
+            )
+            session_key = (
+                self._context.normalize_session_id(session_id)
+                if session_id is not None
+                else None
+            )
             if task:
-                session.request_tasks[request.id] = task
+                self._request_tasks[task_key] = task
+                if session_key is not None:
+                    self._request_task_sessions[task_key] = session_key
             try:
                 message = await self.process(request, session_id)
-                await transport.server_send_message(message, session_id)
+                await transport.server_send_message(
+                    message, session_id, transport_correlation_id
+                )
+            except asyncio.CancelledError:
+                if task_key not in self._client_cancelled_request_tasks:
+                    try:
+                        await transport.server_send_message(
+                            McpError(
+                                id=request.id,
+                                error=McpSystemError(
+                                    code=McpErrorCodes.INVALID_REQUEST,
+                                    message=f"{McpServer.__name__} request cancelled",
+                                ),
+                            ),
+                            session_id,
+                            transport_correlation_id,
+                        )
+                    except Exception:
+                        pass
+                raise
             finally:
-                if task and session.request_tasks.get(request.id) == task:
-                    session.request_tasks.pop(request.id, None)
+                if task and self._request_tasks.get(task_key) == task:
+                    self._request_tasks.pop(task_key, None)
+                    self._request_task_sessions.pop(task_key, None)
+                self._client_cancelled_request_tasks.discard(task_key)
 
         def _handle_cancelled(
             notification: McpCancelledNotification, session_id: str | None
         ) -> None:
-            session = self._get_session(session_id)
-            task = session.request_tasks.get(notification.params.requestId)
+            request_id = notification.params.requestId
+            task_key = self._session_task_key(session_id, request_id)
+            task = self._request_tasks.get(task_key)
+            if task is None and session_id is not None:
+                # NOTE: this fallback only runs when a session_id is present.
+                # Sessionless requests are keyed by an internal transport
+                # correlation id the client never sees, so there is no safe id to
+                # target for cancellation; the request just completes on its own
+                # (or the HTTP layer tears it down on client disconnect). This is
+                # structural, not a missing feature.
+                session_key = self._context.normalize_session_id(session_id)
+                for key, candidate in self._request_tasks.items():
+                    if (
+                        key[1] == request_id
+                        and self._request_task_sessions.get(key) == session_key
+                    ):
+                        task_key = key
+                        task = candidate
+                        break
             if task is not None and not task.done():
+                self._client_cancelled_request_tasks.add(task_key)
                 task.cancel()
 
-        async for message, session_id in transport.server_messages():
+        async for envelope in transport.server_messages():
+            message = envelope.message
+            session_id = envelope.session_id
+            transport_correlation_id = envelope.transport_correlation_id
             if isinstance(message, (McpRequest, McpServerRequest)):
-                asyncio.create_task(_handle_request(message, session_id))
+                asyncio.create_task(
+                    _handle_request(message, session_id, transport_correlation_id)
+                )
             elif isinstance(message, McpCancelledNotification):
                 _handle_cancelled(message, session_id)
-            elif isinstance(message, McpInitializedNotification):
+            elif (
+                isinstance(message, McpInitializedNotification)
+                and session_id is not None
+            ):
                 session = self._get_session(session_id)
                 if self._context.flags.enforce_mcp_initialize_sequence:
                     if session.status == McpSessionStatus.INITIALIZING:

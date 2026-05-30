@@ -20,13 +20,17 @@ from aiomcp.contracts.mcp_message import (
     McpMethod,
     McpInitializeResult,
 )
-from aiomcp.mcp_context import McpServerContext, McpClientContext
+from aiomcp.mcp_context import (
+    McpServerContext,
+    McpClientContext,
+)
 from aiomcp.mcp_serialization import McpSerialization
 from aiomcp.mcp_version import McpVersion
 from aiomcp.mcp_authorization import McpAuthorizationClient, McpAuthorizationServer
 from aiomcp.transports.base import (
     McpClientTransport,
     McpServerTransport,
+    McpServerTransportEnvelope,
     McpTransport,
 )
 
@@ -615,12 +619,10 @@ class McpHttpServerTransport(McpServerTransport):
         self._hostname: str = hostname
         self._port: int = port
         self._runner: Optional[web.AppRunner] = None
-        self._client_to_server: asyncio.Queue[tuple[McpMessage, Optional[str]]] = (
+        self._client_to_server: asyncio.Queue[McpServerTransportEnvelope] = (
             asyncio.Queue()
         )
-        self._inflight: Dict[
-            tuple[Optional[str], str], asyncio.Future[McpResponseOrError]
-        ] = {}
+        self._inflight: Dict[tuple[str, str], asyncio.Future[McpResponseOrError]] = {}
         self._sse_streams: Dict[
             Optional[str], list[asyncio.Queue[Optional[McpMessage]]]
         ] = {}
@@ -646,19 +648,27 @@ class McpHttpServerTransport(McpServerTransport):
         _site = web.TCPSite(self._runner, self._hostname, self._port)
         await _site.start()
 
-    async def server_messages(self) -> AsyncIterator[tuple[McpMessage, Optional[str]]]:
+    async def server_messages(self) -> AsyncIterator[McpServerTransportEnvelope]:
         while True:
-            message_tuple = await self._client_to_server.get()
-            yield message_tuple
+            message = await self._client_to_server.get()
+            yield message
 
     async def server_send_message(
-        self, message: McpMessage, session_id: Optional[str] = None
+        self,
+        message: McpMessage,
+        session_id: Optional[str] = None,
+        transport_correlation_id: Optional[str] = None,
     ) -> bool:
         message = McpSerialization.process_server_message(message)
         if isinstance(message, McpResponseOrError):
             request_id = str(message.id)
-            key = (session_id, request_id)
+            key = (transport_correlation_id or session_id or "", request_id)
             if key not in self._inflight:
+                # NOTE: no in-flight slot for this response. By design the slot is
+                # gone once the request completed, was cancelled/evicted, or the
+                # client disconnected, so a second delivery has nowhere to go.
+                # Raising surfaces a genuine logic bug if it ever fires on the
+                # normal path.
                 raise RuntimeError(
                     f"{McpHttpServerTransport.__name__} has no matching request for response ID {request_id} in session {session_id}"
                 )
@@ -673,7 +683,7 @@ class McpHttpServerTransport(McpServerTransport):
 
     def _next_sse_event_id(self, session_id: Optional[str]) -> str:
         self._sse_event_counter += 1
-        session_key = session_id or "default"
+        session_key = session_id or "sessionless"
         return f"{session_key}:{self._sse_event_counter}"
 
     async def _write_sse_event(
@@ -782,11 +792,10 @@ class McpHttpServerTransport(McpServerTransport):
         session_id = request.headers.get(HEADER_MCP_SESSION_ID)
         if session_id and self._context.is_session_expired(session_id):
             return web.Response(status=404)
-        if (
-            isinstance(message, McpRequest)
-            and message.method == McpMethod.INITIALIZE
-            and not session_id
-        ):
+        is_initialize_request = (
+            isinstance(message, McpRequest) and message.method == McpMethod.INITIALIZE
+        )
+        if is_initialize_request and not session_id:
             session_id = uuid.uuid4().hex
         elif flags.enforce_mcp_session_header and not session_id:
             return web.Response(
@@ -794,30 +803,57 @@ class McpHttpServerTransport(McpServerTransport):
                 text=f"{HEADER_MCP_SESSION_ID} header required",
             )
 
-        session = self._context.get_session(session_id)
+        has_session = session_id is not None
+        session = self._context.get_session(session_id) if has_session else None
 
         if isinstance(message, McpResponseOrError):
-            protocol_header_value = session.version.version or DEFAULT_PROTOCOL_VERSION
+            protocol_header_value = (
+                session.version.version
+                if session is not None
+                else request_protocol_version
+            )
             headers: Dict[str, str] = {}
             if protocol_header_value:
                 headers[HEADER_MCP_PROTOCOL_VERSION] = protocol_header_value
             return web.Response(status=202, headers=headers)
         if isinstance(message, McpNotification):
-            await self._client_to_server.put((message, session_id))
-            protocol_header_value = session.version.version or DEFAULT_PROTOCOL_VERSION
+            await self._client_to_server.put(
+                McpServerTransportEnvelope(message, session_id)
+            )
+            protocol_header_value = (
+                session.version.version
+                if session is not None
+                else request_protocol_version
+            )
             headers: Dict[str, str] = {}
             if protocol_header_value:
                 headers[HEADER_MCP_PROTOCOL_VERSION] = protocol_header_value
             return web.Response(status=202, headers=headers)
         elif isinstance(message, McpRequest):
             future: asyncio.Future[McpResponseOrError] = asyncio.Future()
-            self._inflight[(session_id, str(message.id))] = future
-            await self._client_to_server.put((message, session_id))
-            response = await future
+            transport_correlation_id = uuid.uuid4().hex
+            key = (transport_correlation_id, str(message.id))
+            self._inflight[key] = future
+            try:
+                await self._client_to_server.put(
+                    McpServerTransportEnvelope(
+                        message, session_id, transport_correlation_id
+                    )
+                )
+                response = await future
+            except asyncio.CancelledError:
+                return web.Response(status=404)
+            finally:
+                self._inflight.pop(key, None)
             resp_obj = web.json_response(response.model_dump(by_alias=True))
 
-            session = self._context.get_session(session_id)
-            protocol_header_value = session.version.version or request_protocol_version
+            if session is None:
+                protocol_header_value = request_protocol_version
+            else:
+                session = self._context.get_session(session_id)
+                protocol_header_value = (
+                    session.version.version or request_protocol_version
+                )
             resp_obj.headers[HEADER_MCP_PROTOCOL_VERSION] = (
                 protocol_header_value or DEFAULT_PROTOCOL_VERSION
             )
@@ -837,6 +873,11 @@ class McpHttpServerTransport(McpServerTransport):
             return error_response
 
         session_id = request.headers.get(HEADER_MCP_SESSION_ID)
+        if not session_id:
+            return web.Response(
+                status=400,
+                text=f"{HEADER_MCP_SESSION_ID} header required",
+            )
         session = self._context.get_session(session_id)
         protocol_header_value = session.version.version or DEFAULT_PROTOCOL_VERSION
         response = web.StreamResponse(
@@ -848,6 +889,10 @@ class McpHttpServerTransport(McpServerTransport):
         )
         await response.prepare(request)
 
+        # NOTE: SSE GET streams are intentionally NOT torn down on session
+        # eviction. Server-layer eviction only cancels in-flight request tasks;
+        # an open GET stream is bound to its TCP connection and is cleaned up
+        # here in `finally` when the client disconnects.
         queue: asyncio.Queue[Optional[McpMessage]] = asyncio.Queue()
         streams = self._sse_streams.setdefault(session_id, [])
         streams.append(queue)
@@ -886,13 +931,20 @@ class McpHttpServerTransport(McpServerTransport):
             return error_response
 
         session_id = request.headers.get(HEADER_MCP_SESSION_ID)
+        if not session_id:
+            return web.Response(
+                status=400,
+                text=f"{HEADER_MCP_SESSION_ID} header required",
+            )
         self._context.terminate_session(session_id)
-        streams = self._sse_streams.pop(session_id, [])
-        for stream in streams:
-            await stream.put(None)
         return web.Response(status=202)
 
     async def close(self):
+        self._context = None
+        for future in self._inflight.values():
+            if not future.done():
+                future.cancel()
+        self._inflight.clear()
         streams = list(self._sse_streams.values())
         self._sse_streams.clear()
         for stream_list in streams:
@@ -940,14 +992,19 @@ class McpHttpTransport(McpTransport):
     async def server_initialize(self, context: McpServerContext):
         await self._server.server_initialize(context)
 
-    async def server_messages(self) -> AsyncIterator[tuple[McpMessage, Optional[str]]]:
+    async def server_messages(self) -> AsyncIterator[McpServerTransportEnvelope]:
         async for message in self._server.server_messages():
             yield message
 
     async def server_send_message(
-        self, message: McpMessage, session_id: Optional[str] = None
+        self,
+        message: McpMessage,
+        session_id: Optional[str] = None,
+        transport_correlation_id: Optional[str] = None,
     ) -> bool:
-        return await self._server.server_send_message(message, session_id)
+        return await self._server.server_send_message(
+            message, session_id, transport_correlation_id
+        )
 
     async def close(self):
         await self._client.close()

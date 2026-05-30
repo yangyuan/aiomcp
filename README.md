@@ -454,3 +454,33 @@ Available server flags
 - `enforce_mcp_tool_result_content_format`: validate tool result content against MCP content block.
 - `allow_mcp_tool_result_empty_content`: allow tool results to omit the content.
 
+## Other Customizations
+
+`McpServer` and `McpClient` accept a few constructor parameters to tune runtime behavior.
+
+```python
+from aiomcp import McpClient, McpServer
+
+mcp_server = McpServer(
+    "mcp-server-name",
+    max_sessions=1000,
+    max_expired_sessions=1000,
+)
+
+mcp_client = McpClient(
+    "mcp-client-name",
+    request_timeout=60.0,
+)
+```
+
+`McpServer` parameters
+- `name`: server name reported during initialization. Defaults to `"aiomcp-server"`.
+- `max_sessions`: maximum number of live sessions to retain. This counts all sessions kept alive, including idle ones, not just concurrently active requests, so a session can stay dormant (e.g. a client that sleeps and resumes later) and still occupy a slot. When the cap is reached, the least recently used session is evicted and its in-flight requests are cancelled. Sessionless (transient) requests are not counted toward this cap. Defaults to `1000`.
+- `max_expired_sessions`: maximum number of terminated/evicted session ids to remember as tombstones (so their later requests get a clean `404` instead of being silently re-created). Set to `0` to keep no tombstones. Defaults to `1000`.
+
+> The default of `1000` is tuned for personal and local use. For production or multi-user deployments, raise these limits to match your designed capacity, i.e. how many sessions you intend to retain, including long-lived idle ones that may resume after hours or days. Each retained session and each open connection costs aiomcp well under 1 KB of its own bookkeeping, and the core session lookup/eviction/delivery paths are O(1) — independent of how many sessions you hold.
+
+`McpClient` parameters
+- `name`: client name reported during initialization. Defaults to `"aiomcp-client"`.
+- `request_timeout`: per-request timeout in seconds for calls awaiting a server response. Set to `None` to wait indefinitely. Defaults to `60.0`.
+
